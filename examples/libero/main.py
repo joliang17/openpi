@@ -1,10 +1,23 @@
 import collections
+import sys
+import os
 import dataclasses
 import logging
 import math
 import pathlib
 
 import imageio
+from pathlib import Path
+
+_LIBERO_ROOT = Path("/fs/nexus-scratch/yliang17/Research/VLA/LIBERO")
+
+for p in (str(_LIBERO_ROOT), ):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+os.environ["PYTHONPATH"] = os.pathsep.join(
+    [str(_LIBERO_ROOT), os.environ.get("PYTHONPATH", "")]
+)
 from libero.libero import benchmark
 from libero.libero import get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
@@ -13,6 +26,7 @@ from openpi_client import image_tools
 from openpi_client import websocket_client_policy as _websocket_client_policy
 import tqdm
 import tyro
+import time
 
 LIBERO_DUMMY_ACTION = [0.0] * 6 + [-1.0]
 LIBERO_ENV_RESOLUTION = 256  # resolution used to render training data
@@ -24,7 +38,7 @@ class Args:
     # Model server parameters
     #################################################################################################################
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8005
     resize_size: int = 224
     replan_steps: int = 5
 
@@ -32,10 +46,10 @@ class Args:
     # LIBERO environment-specific parameters
     #################################################################################################################
     task_suite_name: str = (
-        "libero_spatial"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
+        "libero_10"#,"libero_object","libero_goal","libero_10"  # Task suite. Options: libero_spatial, libero_object, libero_goal, libero_10, libero_90
     )
     num_steps_wait: int = 10  # Number of steps to wait for objects to stabilize i n sim
-    num_trials_per_task: int = 50  # Number of rollouts per task
+    num_trials_per_task: int = 10  # Number of rollouts per task
 
     #################################################################################################################
     # Utils
@@ -58,22 +72,22 @@ def eval_libero(args: Args) -> None:
     pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
 
     if args.task_suite_name == "libero_spatial":
-        max_steps = 220  # longest training demo has 193 steps
+        max_steps = 270  # longest training demo has 193 steps
     elif args.task_suite_name == "libero_object":
-        max_steps = 280  # longest training demo has 254 steps
+        max_steps = 300  # longest training demo has 254 steps
     elif args.task_suite_name == "libero_goal":
-        max_steps = 300  # longest training demo has 270 steps
+        max_steps = 320  # longest training demo has 270 steps
     elif args.task_suite_name == "libero_10":
-        max_steps = 520  # longest training demo has 505 steps
+        max_steps = 700  # longest training demo has 505 steps
     elif args.task_suite_name == "libero_90":
         max_steps = 400  # longest training demo has 373 steps
     else:
         raise ValueError(f"Unknown task suite: {args.task_suite_name}")
 
     client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
-
     # Start evaluation
     total_episodes, total_successes = 0, 0
+    # summery = []
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
         # Get task
         task = task_suite.get_task(task_id)
@@ -168,11 +182,11 @@ def eval_libero(args: Args) -> None:
             suffix = "success" if done else "failure"
             task_segment = task_description.replace(" ", "_")
             imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}.mp4",
+                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}_{task_episodes}.mp4",
                 [np.asarray(x) for x in replay_images],
                 fps=10,
+                codec="libx264",
             )
-
             # Log current results
             logging.info(f"Success: {done}")
             logging.info(f"# episodes completed so far: {total_episodes}")
@@ -181,14 +195,22 @@ def eval_libero(args: Args) -> None:
         # Log final results
         logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
         logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
+        # summery.append(f"{total_successes / total_episodes * 100:.1f}")
 
     logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
     logging.info(f"Total episodes: {total_episodes}")
+    success_rate = float(total_successes) / float(total_episodes)
+    message = f"Current total success rate: {success_rate:.4f}\n"  # 可选：格式化小数位
+
+    with open("success_rate1.txt", "a") as f:
+        f.write(message)
+    # print(summery)
 
 
 def _get_libero_env(task, resolution, seed):
     """Initializes and returns the LIBERO environment, along with the task description."""
     task_description = task.language
+    # import ipdb;ipdb.set_trace()
     task_bddl_file = pathlib.Path(get_libero_path("bddl_files")) / task.problem_folder / task.bddl_file
     env_args = {"bddl_file_name": task_bddl_file, "camera_heights": resolution, "camera_widths": resolution}
     env = OffScreenRenderEnv(**env_args)
