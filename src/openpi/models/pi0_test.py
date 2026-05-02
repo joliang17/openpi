@@ -2,6 +2,7 @@ import flax.nnx as nnx
 import jax
 
 import openpi.models.pi0_config as _pi0_config
+import openpi.shared.nnx_utils as nnx_utils
 
 
 def _get_frozen_state(config: _pi0_config.Pi0Config) -> nnx.State:
@@ -9,6 +10,11 @@ def _get_frozen_state(config: _pi0_config.Pi0Config) -> nnx.State:
 
     freeze_filter = config.get_freeze_filter()
     return nnx.state(abstract_model, nnx.All(nnx.Param, freeze_filter)).flat_state()
+
+
+def _get_filtered_state(config: _pi0_config.Pi0Config, state_filter: nnx.filterlib.Filter) -> nnx.State:
+    abstract_model = nnx.eval_shape(config.create, jax.random.key(0))
+    return nnx.state(abstract_model, nnx.All(nnx.Param, state_filter)).flat_state()
 
 
 def test_pi0_full_finetune():
@@ -44,3 +50,30 @@ def test_pi0_all_lora():
     assert len(state) == 17
     assert all("lora" not in p for p in state)
     assert all("llm" in p for p in state)
+
+
+def test_pi05_freeze_vlm_filter():
+    config = _pi0_config.Pi0Config(pi05=True, action_horizon=10, discrete_state_input=False)
+    freeze_filter = nnx.Any(
+        nnx_utils.PathRegex(".*img.*"),
+        nnx.All(
+            nnx_utils.PathRegex(".*llm.*"),
+            nnx.Not(nnx_utils.PathRegex(".*_1.*")),
+        ),
+    )
+
+    frozen_state = _get_filtered_state(config, freeze_filter)
+    assert len(frozen_state) > 0
+    assert any("img" in path for path in frozen_state)
+    assert any("llm" in path for path in frozen_state)
+    assert all(
+        "img" in path or ("llm" in path and not any("_1" in part for part in path)) for path in frozen_state
+    )
+
+    trainable_filter = nnx.All(nnx.Param, nnx.Not(freeze_filter))
+    trainable_state = _get_filtered_state(config, trainable_filter)
+    assert any(any("_1" in part for part in path) for path in trainable_state)
+    assert any("action_in_proj" in path for path in trainable_state)
+    assert any("time_mlp_in" in path for path in trainable_state)
+    assert any("time_mlp_out" in path for path in trainable_state)
+    assert any("action_out_proj" in path for path in trainable_state)

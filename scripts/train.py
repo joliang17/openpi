@@ -81,6 +81,22 @@ def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shap
     )
 
 
+def _trainable_params_to_info(params: nnx.State, trainable_filter: nnx.filterlib.Filter) -> str:
+    trainable_params = params.filter(trainable_filter)
+
+    def param_value(value):
+        return value.value if hasattr(value, "value") else value
+
+    def param_info(value) -> str:
+        value = param_value(value)
+        return f"{value.shape}@{value.dtype}"
+
+    total_params = sum(
+        int(np.prod(param_value(value).shape)) for value in jax.tree_util.tree_leaves(trainable_params)
+    )
+    return f"{training_utils.tree_to_info(trainable_params, param_info)}\nTotal trainable parameters: {total_params:,}"
+
+
 @at.typecheck
 def init_train_state(
     config: _config.TrainConfig, init_rng: at.KeyArrayLike, mesh: jax.sharding.Mesh, *, resume: bool
@@ -235,7 +251,7 @@ def main(config: _config.TrainConfig):
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     jax.block_until_ready(train_state)
-    logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
+    logging.info(f"Trainable parameters:\n{_trainable_params_to_info(train_state.params, config.trainable_filter)}")
 
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
