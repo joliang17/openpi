@@ -32,6 +32,17 @@ class Pi0Config(_model.BaseModelConfig):
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
+    # Optional pi0.5 skill-router experiment. Disabled by default.
+    use_skill_router: bool = False
+    num_skills: int = 0
+    skill_emb_dim: int = 256
+    skill_router_hidden_dim: int = 256
+    skill_stage: str = "action"  # "classifier" or "action"
+    skill_clf_loss_weight: float = 1.0
+    skill_emb_div_loss_weight: float = 0.01
+    skill_emb_norm_loss_weight: float = 0.001
+    use_skill_action_film: bool = True
+
     pytorch_compile_mode: str | None = "max-autotune"
 
     def __post_init__(self):
@@ -46,6 +57,13 @@ class Pi0Config(_model.BaseModelConfig):
                 "max-autotune",
                 "max-autotune-no-cudagraphs",
             ]
+        if self.use_skill_router:
+            if not self.pi05:
+                raise ValueError("Skill-router conditioning is implemented for pi0.5 only.")
+            if self.num_skills <= 0:
+                raise ValueError("num_skills must be positive when use_skill_router=True.")
+            if self.skill_stage not in ("classifier", "action"):
+                raise ValueError("skill_stage must be 'classifier' or 'action'.")
 
     @property
     @override
@@ -80,6 +98,8 @@ class Pi0Config(_model.BaseModelConfig):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                skill_id=jax.ShapeDtypeStruct([batch_size], jnp.int32) if self.use_skill_router else None,
+                skill_mask=jax.ShapeDtypeStruct([batch_size], jnp.bool_) if self.use_skill_router else None,
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 

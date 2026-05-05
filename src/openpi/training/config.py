@@ -34,6 +34,10 @@ import openpi.transforms as _transforms
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
+LIBERO_SKILL_ANNOTATION_PATH = os.getenv(
+    "OPENPI_LIBERO_SKILL_ANNOTATION_PATH",
+    "data_split_json/libero_lerobot_addskill_10_half.json",
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -91,6 +95,11 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+
+    # Optional skill annotations for skill-router experiments. The JSON maps episode ids to segment lists.
+    skill_annotation_path: str | None = None
+    skill_vocab: Sequence[str] = ("close", "open", "pick", "place", "turn")
+    skill_label_type: str = "primary_action_verb"
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -300,17 +309,20 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         # For your own dataset, first figure out what keys your environment passes to the policy server
         # and then modify the mappings below so your dataset's keys get matched to those target keys.
         # The repack transform simply remaps key names here.
+        repack_keys = {
+            "observation/image": "image",
+            "observation/wrist_image": "wrist_image",
+            "observation/state": "state",
+            "actions": "actions",
+            "prompt": "prompt",
+        }
+        if self.base_config is not None and self.base_config.skill_annotation_path is not None:
+            repack_keys["skill_id"] = "skill_id"
+            repack_keys["skill_mask"] = "skill_mask"
+
         repack_transform = _transforms.Group(
             inputs=[
-                _transforms.RepackTransform(
-                    {
-                        "observation/image": "image",
-                        "observation/wrist_image": "wrist_image",
-                        "observation/state": "state",
-                        "actions": "actions",
-                        "prompt": "prompt",
-                    }
-                )
+                _transforms.RepackTransform(repack_keys)
             ]
         )
 
@@ -822,6 +834,100 @@ _CONFIGS = [
                     nnx_utils.PathRegex(".*action_out_proj.*"),
                     nnx_utils.PathRegex(".*time_mlp_in.*"),
                     nnx_utils.PathRegex(".*time_mlp_out.*"),
+                )
+            ),
+        ),
+    ),
+    TrainConfig(
+        name="pi05_libero_skill_router_stage1",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            use_skill_router=True,
+            num_skills=5,
+            skill_stage="classifier",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="libero_atomic",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                skill_annotation_path=LIBERO_SKILL_ANNOTATION_PATH,
+                skill_vocab=("close", "open", "pick", "place", "turn"),
+                skill_label_type="primary_action_verb",
+            ),
+            extra_delta_transform=False,
+        ),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=1e-4,
+            decay_steps=30_000,
+            decay_lr=1e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        weight_loader=weight_loaders.PartialCheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            missing_regex=".*skill_.*",
+        ),
+        num_train_steps=30_000,
+        freeze_filter=nnx.All(
+            nnx.Param,
+            nnx.Not(
+                nnx.Any(
+                    nnx_utils.PathRegex(".*skill_pool_proj.*"),
+                    nnx_utils.PathRegex(".*skill_classifier.*"),
+                )
+            ),
+        ),
+    ),
+    TrainConfig(
+        name="pi05_libero_skill_router_stage2",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            use_skill_router=True,
+            num_skills=5,
+            skill_stage="action",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="libero_atomic",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                skill_annotation_path=LIBERO_SKILL_ANNOTATION_PATH,
+                skill_vocab=("close", "open", "pick", "place", "turn"),
+                skill_label_type="primary_action_verb",
+            ),
+            extra_delta_transform=False,
+        ),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=5e-5,
+            decay_steps=30_000,
+            decay_lr=5e-6,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=0.999,
+        weight_loader=weight_loaders.PartialCheckpointWeightLoader(
+            os.getenv("OPENPI_SKILL_STAGE1_PARAMS", "gs://openpi-assets/checkpoints/pi05_base/params"),
+            missing_regex=".*skill_.*",
+        ),
+        num_train_steps=30_000,
+        freeze_filter=nnx.All(
+            nnx.Param,
+            nnx.Not(
+                nnx.Any(
+                    nnx_utils.PathRegex(".*llm.*_1.*"),
+                    nnx_utils.PathRegex(".*action_in_proj.*"),
+                    nnx_utils.PathRegex(".*action_out_proj.*"),
+                    nnx_utils.PathRegex(".*time_mlp_in.*"),
+                    nnx_utils.PathRegex(".*time_mlp_out.*"),
+                    nnx_utils.PathRegex(".*skill_emb_bank.*"),
+                    nnx_utils.PathRegex(".*skill_to_adarms.*"),
+                    nnx_utils.PathRegex(".*skill_to_action_film.*"),
                 )
             ),
         ),

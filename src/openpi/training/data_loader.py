@@ -1,7 +1,9 @@
 from collections.abc import Iterator, Sequence
+import json
 import logging
 import multiprocessing
 import os
+import pathlib
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
@@ -60,6 +62,73 @@ class TransformedDataset(Dataset[T_co]):
 
     def __len__(self) -> int:
         return len(self._dataset)
+
+
+class SkillAnnotatedDataset(Dataset):
+    """Adds per-frame skill ids from AtomicVLA/GR00T-style LIBERO segment annotations."""
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        annotation_path: str,
+        *,
+        skill_vocab: Sequence[str],
+        skill_label_type: str,
+    ):
+        self._dataset = dataset
+        self._skill_to_id = {skill: i for i, skill in enumerate(skill_vocab)}
+        self._skill_label_type = skill_label_type
+        annotation_file = pathlib.Path(annotation_path).expanduser()
+        if not annotation_file.exists():
+            raise FileNotFoundError(
+                f"Skill annotation file not found: {annotation_file}. "
+                "Set OPENPI_LIBERO_SKILL_ANNOTATION_PATH or place the file at "
+                "data_split_json/libero_lerobot_addskill_10_half.json."
+            )
+        with annotation_file.open() as f:
+            raw_annotations = json.load(f)
+        self._annotations = {}
+        for episode_key, value in raw_annotations.items():
+            try:
+                normalized_key = int(episode_key)
+            except (TypeError, ValueError):
+                normalized_key = episode_key
+            self._annotations[normalized_key] = value.get("segments", value) if isinstance(value, dict) else value
+
+    def __getitem__(self, index: SupportsIndex):
+        item = self._dataset[index]
+        episode_index = _scalar(item.get("episode_index"))
+        frame_index = _scalar(item.get("frame_index"))
+        skill_id = -1
+        if episode_index in self._annotations and frame_index is not None:
+            for segment in self._annotations[episode_index]:
+                end_frame = segment.get("end_frame", 10**12)
+                if end_frame == -1:
+                    end_frame = 10**12
+                if segment.get("start_frame", 0) <= frame_index <= end_frame:
+                    skill_text = (
+                        segment.get(self._skill_label_type)
+                        or segment.get("primary_action_verb")
+                        or segment.get("skill")
+                    )
+                    skill_id = self._skill_to_id.get(skill_text, -1)
+                    break
+        return {
+            **item,
+            "skill_id": np.asarray(max(skill_id, 0), dtype=np.int32),
+            "skill_mask": np.asarray(skill_id >= 0, dtype=np.bool_),
+        }
+
+    def __len__(self) -> int:
+        return len(self._dataset)
+
+
+def _scalar(value):
+    if value is None:
+        return None
+    if hasattr(value, "item"):
+        return value.item()
+    return value
 
 
 class IterableTransformedDataset(IterableDataset[T_co]):
@@ -147,6 +216,13 @@ def create_torch_dataset(
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+    if data_config.skill_annotation_path is not None:
+        dataset = SkillAnnotatedDataset(
+            dataset,
+            data_config.skill_annotation_path,
+            skill_vocab=data_config.skill_vocab,
+            skill_label_type=data_config.skill_label_type,
+        )
 
     return dataset
 

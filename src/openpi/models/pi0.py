@@ -98,9 +98,77 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
+        self.use_skill_router = config.use_skill_router
+        self.skill_stage = config.skill_stage
+        self.num_skills = config.num_skills
+        self.use_skill_action_film = config.use_skill_action_film
+        self.skill_clf_loss_weight = config.skill_clf_loss_weight
+        self.skill_emb_div_loss_weight = config.skill_emb_div_loss_weight
+        self.skill_emb_norm_loss_weight = config.skill_emb_norm_loss_weight
+        if config.use_skill_router:
+            self.skill_pool_proj = nnx.Linear(
+                paligemma_config.width, config.skill_router_hidden_dim, rngs=rngs
+            )
+            self.skill_classifier = nnx.Linear(config.skill_router_hidden_dim, config.num_skills, rngs=rngs)
+            self.skill_emb_bank = nnx.Param(
+                jax.random.normal(rngs.params(), (config.num_skills, config.skill_emb_dim)) * 0.02
+            )
+            self.skill_to_adarms = nnx.Linear(config.skill_emb_dim, action_expert_config.width, rngs=rngs)
+            if config.use_skill_action_film:
+                self.skill_to_action_film = nnx.Linear(config.skill_emb_dim, 2 * action_expert_config.width, rngs=rngs)
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
+
+    def _classify_skill(
+        self, prefix_out: at.Float[at.Array, "b s emb"], prefix_mask: at.Bool[at.Array, "b s"]
+    ) -> at.Float[at.Array, "b n"]:
+        mask = prefix_mask.astype(prefix_out.dtype)[..., None]
+        pooled = jnp.sum(prefix_out * mask, axis=1) / jnp.clip(jnp.sum(mask, axis=1), 1.0)
+        hidden = self.skill_pool_proj(pooled)
+        hidden = nnx.swish(hidden)
+        return self.skill_classifier(hidden)
+
+    def _skill_condition(
+        self, skill_logits: at.Float[at.Array, "b n"]
+    ) -> tuple[at.Float[at.Array, "b emb"], at.Float[at.Array, "b emb"] | None]:
+        skill_probs = jax.nn.softmax(skill_logits, axis=-1)
+        skill_emb = skill_probs @ self.skill_emb_bank.value
+        adarms_skill_cond = self.skill_to_adarms(skill_emb)
+        action_film = self.skill_to_action_film(skill_emb) if self.use_skill_action_film else None
+        return adarms_skill_cond, action_film
+
+    def _skill_losses(
+        self, skill_logits: at.Float[at.Array, "b n"], obs: _model.Observation
+    ) -> tuple[at.Float[at.Array, " b"], dict[str, at.Array]]:
+        if obs.skill_id is None:
+            zeros = jnp.zeros(skill_logits.shape[0], dtype=skill_logits.dtype)
+            return zeros, {
+                "skill_cls_loss": jnp.asarray(0.0, dtype=skill_logits.dtype),
+                "skill_acc": jnp.asarray(0.0, dtype=skill_logits.dtype),
+            }
+        skill_mask = (
+            jnp.ones(skill_logits.shape[0], dtype=jnp.bool_)
+            if obs.skill_mask is None
+            else obs.skill_mask.astype(jnp.bool_)
+        )
+        labels = jnp.clip(obs.skill_id.astype(jnp.int32), 0, self.num_skills - 1)
+        per_example = -jnp.sum(jax.nn.one_hot(labels, self.num_skills) * jax.nn.log_softmax(skill_logits), axis=-1)
+        per_example = jnp.where(skill_mask, per_example, 0.0)
+        denom = jnp.clip(jnp.sum(skill_mask), 1)
+        mean_ce = jnp.sum(per_example) / denom
+        correct = (jnp.argmax(skill_logits, axis=-1) == labels).astype(skill_logits.dtype)
+        acc = jnp.sum(jnp.where(skill_mask, correct, 0.0)) / denom
+        return per_example, {"skill_cls_loss": mean_ce, "skill_acc": acc}
+
+    def _skill_embedding_regularizers(self) -> dict[str, at.Array]:
+        emb = self.skill_emb_bank.value
+        emb_norm = emb / jnp.clip(jnp.linalg.norm(emb, axis=-1, keepdims=True), 1e-6)
+        gram = emb_norm @ emb_norm.T
+        off_diag = gram - jnp.eye(self.num_skills, dtype=gram.dtype)
+        div_loss = jnp.mean(jnp.square(off_diag))
+        norm_loss = jnp.mean(1.0 / (jnp.square(jnp.linalg.norm(emb, axis=-1)) + 1e-6))
+        return {"skill_emb_div_loss": div_loss, "skill_emb_norm_loss": norm_loss}
 
     @at.typecheck
     def embed_prefix(
@@ -138,7 +206,12 @@ class Pi0(_model.BaseModel):
 
     @at.typecheck
     def embed_suffix(
-        self, obs: _model.Observation, noisy_actions: _model.Actions, timestep: at.Float[at.Array, " b"]
+        self,
+        obs: _model.Observation,
+        noisy_actions: _model.Actions,
+        timestep: at.Float[at.Array, " b"],
+        skill_adarms_cond: at.Float[at.Array, "b emb"] | None = None,
+        skill_action_film: at.Float[at.Array, "b emb2"] | None = None,
     ) -> tuple[
         at.Float[at.Array, "b s emb"],
         at.Bool[at.Array, "b s"],
@@ -157,6 +230,9 @@ class Pi0(_model.BaseModel):
             ar_mask += [True]
 
         action_tokens = self.action_in_proj(noisy_actions)
+        if skill_action_film is not None:
+            gamma, beta = jnp.split(skill_action_film, 2, axis=-1)
+            action_tokens = action_tokens * (1.0 + gamma[:, None, :]) + beta[:, None, :]
         # embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
         time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
         if self.pi05:
@@ -165,6 +241,8 @@ class Pi0(_model.BaseModel):
             time_emb = nnx.swish(time_emb)
             time_emb = self.time_mlp_out(time_emb)
             time_emb = nnx.swish(time_emb)
+            if skill_adarms_cond is not None:
+                time_emb = time_emb + skill_adarms_cond
             action_expert_tokens = action_tokens
             adarms_cond = time_emb
         else:
@@ -188,7 +266,7 @@ class Pi0(_model.BaseModel):
     @override
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
-    ) -> at.Float[at.Array, "*b ah"]:
+    ) -> at.Float[at.Array, "*b ah"] | tuple[at.Float[at.Array, "*b ah"], dict[str, at.Array]]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
@@ -201,7 +279,25 @@ class Pi0(_model.BaseModel):
 
         # one big forward pass of prefix + suffix at once
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
+        skill_logits = None
+        skill_adarms_cond = None
+        skill_action_film = None
+        if self.use_skill_router:
+            prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+            prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
+            (prefix_out_for_skill, _), _ = self.PaliGemma.llm(
+                [prefix_tokens, None], mask=prefix_attn_mask, positions=prefix_positions, adarms_cond=[None, None]
+            )
+            skill_logits = self._classify_skill(prefix_out_for_skill, prefix_mask)
+            skill_adarms_cond, skill_action_film = self._skill_condition(skill_logits)
+            if self.skill_stage == "classifier":
+                skill_loss, skill_info = self._skill_losses(skill_logits, observation)
+                skill_loss = einops.repeat(skill_loss, "b -> b s", s=self.action_horizon)
+                return self.skill_clf_loss_weight * skill_loss, skill_info
+
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
+            observation, x_t, time, skill_adarms_cond, skill_action_film
+        )
         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, ar_mask)
@@ -210,8 +306,23 @@ class Pi0(_model.BaseModel):
             [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+        action_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        if not self.use_skill_router:
+            return action_loss
 
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        reg = self._skill_embedding_regularizers()
+        _, skill_info = self._skill_losses(skill_logits, observation)
+        total_loss = (
+            action_loss
+            + self.skill_emb_div_loss_weight * reg["skill_emb_div_loss"]
+            + self.skill_emb_norm_loss_weight * reg["skill_emb_norm_loss"]
+        )
+        info = {
+            "action_loss": jnp.mean(action_loss),
+            **skill_info,
+            **reg,
+        }
+        return total_loss, info
 
     @override
     def sample_actions(
@@ -234,12 +345,19 @@ class Pi0(_model.BaseModel):
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        (prefix_out, _), kv_cache = self.PaliGemma.llm(
+            [prefix_tokens, None], mask=prefix_attn_mask, positions=positions
+        )
+        skill_adarms_cond = None
+        skill_action_film = None
+        if self.use_skill_router:
+            skill_logits = self._classify_skill(prefix_out, prefix_mask)
+            skill_adarms_cond, skill_action_film = self._skill_condition(skill_logits)
 
         def step(carry):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-                observation, x_t, jnp.broadcast_to(time, batch_size)
+                observation, x_t, jnp.broadcast_to(time, batch_size), skill_adarms_cond, skill_action_film
             )
             # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
             # other
