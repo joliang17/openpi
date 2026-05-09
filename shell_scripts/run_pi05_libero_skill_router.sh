@@ -36,9 +36,20 @@ export XLA_PYTHON_CLIENT_PREALLOCATE=true
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 
 CHECKPOINT_BASE_DIR="/fs/nexus-projects/wilddiffusion/vla/openpi_skill_router"
-STAGE1_EXP="pi05_skill_router_stage1"
-STAGE2_EXP="pi05_skill_router_stage2"
-STAGE1_STEP="${STAGE1_STEP:-29999}"
+RUN_TS="${RUN_TS:-$(date +%Y%m%d_%H%M%S)}"
+STAGE1_EXP_PROVIDED="${STAGE1_EXP:-}"
+STAGE1_EXP="${STAGE1_EXP:-pi05_skill_router_stage1_20260507_101717}"
+STAGE2_EXP_PROVIDED="${STAGE2_EXP:-}"
+STAGE2_EXP="${STAGE2_EXP:-pi05_skill_router_stage2_from_stage1_20260507_101717_step6000_${RUN_TS}}"
+STAGE1_STEP="${STAGE1_STEP:-6000}"
+TRAIN_STAGE1="${TRAIN_STAGE1:-0}"
+STAGE1_RESUME="${STAGE1_RESUME:-0}"
+STAGE1_OVERWRITE="${STAGE1_OVERWRITE:-0}"
+STAGE1_NUM_TRAIN_STEPS="${STAGE1_NUM_TRAIN_STEPS:-60000}"
+STAGE2_RESUME="${STAGE2_RESUME:-0}"
+STAGE2_NUM_TRAIN_STEPS="${STAGE2_NUM_TRAIN_STEPS:-30000}"
+TRAIN_STAGE2="${TRAIN_STAGE2:-1}"
+STAGE1_PARAMS="${STAGE1_PARAMS:-${CHECKPOINT_BASE_DIR}/pi05_libero_skill_router_stage1/${STAGE1_EXP}/${STAGE1_STEP}/params}"
 
 compute_norm_stats_if_missing() {
   local config_name="$1"
@@ -56,18 +67,70 @@ compute_norm_stats_if_missing() {
 STAGE1_CONFIG="pi05_libero_skill_router_stage1"
 STAGE2_CONFIG="pi05_libero_skill_router_stage2"
 
-compute_norm_stats_if_missing "${STAGE1_CONFIG}"
+if [[ "${TRAIN_STAGE1}" == "1" ]]; then
+  compute_norm_stats_if_missing "${STAGE1_CONFIG}"
 
-python3 scripts/train.py "${STAGE1_CONFIG}" \
-  --exp-name="${STAGE1_EXP}" \
-  --checkpoint-base-dir="${CHECKPOINT_BASE_DIR}" \
-  --resume
+  STAGE1_ARGS=(
+    "${STAGE1_CONFIG}"
+    --exp-name="${STAGE1_EXP}"
+    --checkpoint-base-dir="${CHECKPOINT_BASE_DIR}"
+    --num-train-steps="${STAGE1_NUM_TRAIN_STEPS}"
+  )
 
-export OPENPI_SKILL_STAGE1_PARAMS="${CHECKPOINT_BASE_DIR}/pi05_libero_skill_router_stage1/${STAGE1_EXP}/${STAGE1_STEP}/params"
+  if [[ "${STAGE1_RESUME}" == "1" ]]; then
+    if [[ -z "${STAGE1_EXP_PROVIDED}" ]]; then
+      echo "STAGE1_RESUME=1 requires STAGE1_EXP to name an existing checkpoint folder." >&2
+      exit 1
+    fi
+    STAGE1_ARGS+=(--resume)
+  elif [[ "${STAGE1_OVERWRITE}" == "1" ]]; then
+    STAGE1_ARGS+=(--overwrite)
+  fi
+
+  echo "Stage 1 checkpoint exp: ${STAGE1_EXP}"
+  echo "Stage 1 resume: ${STAGE1_RESUME}"
+  echo "Stage 1 train steps: ${STAGE1_NUM_TRAIN_STEPS}"
+  python3 scripts/train.py "${STAGE1_ARGS[@]}"
+
+  STAGE1_STEP_FOR_STAGE2="${STAGE1_STEP}"
+  if [[ -z "${STAGE1_STEP_FOR_STAGE2}" || "${STAGE1_STEP_FOR_STAGE2}" == "auto" ]]; then
+    STAGE1_STEP_FOR_STAGE2="$((STAGE1_NUM_TRAIN_STEPS - 1))"
+  fi
+  STAGE1_PARAMS="${CHECKPOINT_BASE_DIR}/pi05_libero_skill_router_stage1/${STAGE1_EXP}/${STAGE1_STEP_FOR_STAGE2}/params"
+else
+  echo "TRAIN_STAGE1=${TRAIN_STAGE1}; skipping stage 1."
+fi
+
+if [[ ! -d "${STAGE1_PARAMS}" ]]; then
+  echo "Stage 1 params directory not found: ${STAGE1_PARAMS}" >&2
+  exit 1
+fi
+export OPENPI_SKILL_STAGE1_PARAMS="${STAGE1_PARAMS}"
+echo "Stage 1 params for stage 2: ${OPENPI_SKILL_STAGE1_PARAMS}"
+
+if [[ "${TRAIN_STAGE2}" != "1" ]]; then
+  echo "TRAIN_STAGE2=${TRAIN_STAGE2}; skipping stage 2."
+  exit 0
+fi
 
 compute_norm_stats_if_missing "${STAGE2_CONFIG}"
 
-python3 scripts/train.py "${STAGE2_CONFIG}" \
-  --exp-name="${STAGE2_EXP}" \
-  --checkpoint-base-dir="${CHECKPOINT_BASE_DIR}" \
-  --resume
+TRAIN_ARGS=(
+  "${STAGE2_CONFIG}"
+  --exp-name="${STAGE2_EXP}"
+  --checkpoint-base-dir="${CHECKPOINT_BASE_DIR}"
+  --num-train-steps="${STAGE2_NUM_TRAIN_STEPS}"
+)
+
+if [[ "${STAGE2_RESUME}" == "1" ]]; then
+  if [[ -z "${STAGE2_EXP_PROVIDED}" ]]; then
+    echo "STAGE2_RESUME=1 requires STAGE2_EXP to name an existing checkpoint folder." >&2
+    exit 1
+  fi
+  TRAIN_ARGS+=(--resume)
+fi
+
+echo "Stage 2 checkpoint exp: ${STAGE2_EXP}"
+echo "Stage 2 resume: ${STAGE2_RESUME}"
+echo "Stage 2 train steps: ${STAGE2_NUM_TRAIN_STEPS}"
+python3 scripts/train.py "${TRAIN_ARGS[@]}"

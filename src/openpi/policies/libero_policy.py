@@ -80,6 +80,11 @@ class LiberoInputs(transforms.DataTransformFn):
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
 
+        if "skill_id" in data:
+            inputs["skill_id"] = data["skill_id"]
+        if "skill_mask" in data:
+            inputs["skill_mask"] = data["skill_mask"]
+
         return inputs
 
 

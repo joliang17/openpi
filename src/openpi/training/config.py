@@ -839,6 +839,41 @@ _CONFIGS = [
         ),
     ),
     TrainConfig(
+        name="pi05_libero_vlm_lora_action_expert",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path=f"{os.getenv('OPENPI_DATA_HOME')}/openpi-assets/checkpoints/pi05_base_torch",
+        num_train_steps=30_000,
+        freeze_filter=nnx.Any(
+            nnx_utils.PathRegex(".*img.*"),
+            nnx.All(
+                nnx_utils.PathRegex(".*llm.*"),
+                nnx.Not(nnx_utils.PathRegex(".*_1.*")),
+                nnx.Not(nnx_utils.PathRegex(".*lora.*")),
+            ),
+        ),
+    ),
+    TrainConfig(
         name="pi05_libero_skill_router_stage1",
         model=pi0_config.Pi0Config(
             pi05=True,

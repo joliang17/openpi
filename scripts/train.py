@@ -1,6 +1,7 @@
 import dataclasses
 import functools
 import logging
+import numbers
 import platform
 from typing import Any
 
@@ -95,6 +96,61 @@ def _trainable_params_to_info(params: nnx.State, trainable_filter: nnx.filterlib
         int(np.prod(param_value(value).shape)) for value in jax.tree_util.tree_leaves(trainable_params)
     )
     return f"{training_utils.tree_to_info(trainable_params, param_info)}\nTotal trainable parameters: {total_params:,}"
+
+
+def _reduce_metric(value):
+    try:
+        array = jnp.asarray(value)
+    except (TypeError, ValueError):
+        return value
+
+    if not (jnp.issubdtype(array.dtype, jnp.number) or jnp.issubdtype(array.dtype, jnp.bool_)):
+        np_array = np.asarray(value)
+        if np_array.shape == ():
+            return np_array.item()
+        if np_array.size > 0:
+            return np_array.reshape(-1)[0].item()
+        return value
+    return jnp.mean(array)
+
+
+def _format_metric(value) -> str:
+    try:
+        array = np.asarray(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    if array.shape == () and (np.issubdtype(array.dtype, np.number) or np.issubdtype(array.dtype, np.bool_)):
+        return f"{float(array):.4f}"
+    if array.shape == ():
+        return str(array.item())
+    if array.size > 0 and not (np.issubdtype(array.dtype, np.number) or np.issubdtype(array.dtype, np.bool_)):
+        return str(array.reshape(-1)[0].item())
+    return str(value)
+
+
+def _format_metrics(metrics: dict[str, Any]) -> str:
+    return ", ".join(f"{key}={_format_metric(value)}" for key, value in metrics.items())
+
+
+def _wandb_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    loggable = {}
+    for key, value in metrics.items():
+        try:
+            array = np.asarray(value)
+        except (TypeError, ValueError):
+            continue
+        if array.shape == ():
+            item = array.item()
+            if isinstance(item, numbers.Number | np.bool_):
+                loggable[key] = float(item)
+        elif array.size == 1:
+            item = array.reshape(-1)[0].item()
+            if isinstance(item, numbers.Number | np.bool_):
+                loggable[key] = float(item)
+        elif np.issubdtype(array.dtype, np.number) or np.issubdtype(array.dtype, np.bool_):
+            loggable[key] = float(np.mean(array))
+    return loggable
 
 
 @at.typecheck
@@ -285,10 +341,9 @@ def main(config: _config.TrainConfig):
         infos.append(info)
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
-            reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
-            info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
-            pbar.write(f"Step {step}: {info_str}")
-            wandb.log(reduced_info, step=step)
+            reduced_info = jax.device_get(jax.tree.map(_reduce_metric, stacked_infos))
+            pbar.write(f"Step {step}: {_format_metrics(reduced_info)}")
+            wandb.log(_wandb_metrics(reduced_info), step=step)
             infos = []
         batch = next(data_iter)
 
