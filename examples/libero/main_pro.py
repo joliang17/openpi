@@ -2,6 +2,7 @@ import collections
 import sys
 import os
 import argparse
+import json
 import logging
 import math
 import pathlib
@@ -236,6 +237,7 @@ def eval_libero_pro(args) -> None:
 
     client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
     total_episodes, total_successes = 0, 0
+    task_results = []
 
     for task_id in tqdm.tqdm(range(num_tasks)):
 
@@ -378,17 +380,51 @@ def eval_libero_pro(args) -> None:
 
         env.close()
 
-        print(f"Current task success rate: {float(task_successes) / float(task_episodes):.3f}")
-        print(f"Current total success rate: {float(total_successes) / float(total_episodes):.3f}")
-        log_file.write(f"Current task success rate: {float(task_successes) / float(task_episodes):.3f}\n")
-        log_file.write(f"Current total success rate: {float(total_successes) / float(total_episodes):.3f}\n")
+        task_success_rate = float(task_successes) / float(task_episodes)
+        total_success_rate = float(total_successes) / float(total_episodes)
+        print(f"Current task success rate: {task_success_rate:.3f}")
+        print(f"Current total success rate: {total_success_rate:.3f}")
+        log_file.write(f"Current task success rate: {task_success_rate:.3f}\n")
+        log_file.write(f"Current total success rate: {total_success_rate:.3f}\n")
         log_file.flush()
+        task_results.append(
+            {
+                "task_id": task_id,
+                "task_description": task_description,
+                "episodes": task_episodes,
+                "successes": task_successes,
+                "success_rate": task_success_rate,
+            }
+        )
 
     if temp_bddl_dir and os.path.isdir(temp_bddl_dir):
         shutil.rmtree(temp_bddl_dir, ignore_errors=True)
 
     log_file.close()
-    print(f"\nFinal: {total_successes}/{total_episodes} = {total_successes / total_episodes * 100:.1f}%")
+    success_rate = total_successes / total_episodes
+    print(f"\nFinal: {total_successes}/{total_episodes} = {success_rate * 100:.1f}%")
+
+    results_dir = pathlib.Path(args.results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    model_name = args.model_name
+    log_suffix = f"model{model_name}_task{args.task_suite_name}_seed{args.seed}_h{args.action_horizon}"
+    result_path = f"{results_dir}/libero_eval_{log_suffix}.json"
+    result = {
+        "model_name": model_name,
+        "task_suite_name": args.task_suite_name,
+        "perturbation_type": args.perturbation_type,
+        "random_seed": args.seed,
+        "action_horizon": args.action_horizon,
+        "num_trials_per_task": args.num_trials_per_task,
+        "total_episodes": total_episodes,
+        "total_successes": total_successes,
+        "success_rate": success_rate,
+        "success_percent": success_rate * 100.0,
+        "task_results": task_results,
+    }
+    with open(result_path, "w") as f:
+        json.dump(result, f, indent=2)
+    print(f"Results saved to {result_path}")
 
 
 if __name__ == "__main__":
@@ -420,6 +456,9 @@ if __name__ == "__main__":
 
     # Output
     parser.add_argument("--video_out_path", type=str, default="data/libero_pro/videos")
+    parser.add_argument("--results_dir", type=str, default="results")
+    parser.add_argument("--model_name", type=str, default="openpi")
+    parser.add_argument("--action_horizon", type=int, default=10)
     parser.add_argument("--seed", type=int, default=7)
 
     args = parser.parse_args()

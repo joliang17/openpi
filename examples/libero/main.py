@@ -2,6 +2,7 @@ import collections
 import sys
 import os
 import dataclasses
+import json
 import logging
 import math
 import pathlib
@@ -55,6 +56,9 @@ class Args:
     # Utils
     #################################################################################################################
     video_out_path: str = "data/libero/videos"  # Path to save videos
+    results_dir: str = "results"
+    model_name: str = "openpi"
+    action_horizon: int = 10
 
     seed: int = 7  # Random Seed (for reproducibility)
 
@@ -87,6 +91,7 @@ def eval_libero(args: Args) -> None:
     client = _websocket_client_policy.WebsocketClientPolicy(args.host, args.port)
     # Start evaluation
     total_episodes, total_successes = 0, 0
+    task_results = []
     # summery = []
     for task_id in tqdm.tqdm(range(num_tasks_in_suite)):
         # Get task
@@ -193,17 +198,48 @@ def eval_libero(args: Args) -> None:
             logging.info(f"# successes: {total_successes} ({total_successes / total_episodes * 100:.1f}%)")
 
         # Log final results
-        logging.info(f"Current task success rate: {float(task_successes) / float(task_episodes)}")
-        logging.info(f"Current total success rate: {float(total_successes) / float(total_episodes)}")
+        task_success_rate = float(task_successes) / float(task_episodes)
+        total_success_rate = float(total_successes) / float(total_episodes)
+        logging.info(f"Current task success rate: {task_success_rate}")
+        logging.info(f"Current total success rate: {total_success_rate}")
+        task_results.append(
+            {
+                "task_id": task_id,
+                "task_description": task_description,
+                "episodes": task_episodes,
+                "successes": task_successes,
+                "success_rate": task_success_rate,
+            }
+        )
         # summery.append(f"{total_successes / total_episodes * 100:.1f}")
 
-    logging.info(f"Total success rate: {float(total_successes) / float(total_episodes)}")
-    logging.info(f"Total episodes: {total_episodes}")
     success_rate = float(total_successes) / float(total_episodes)
+    logging.info(f"Total success rate: {success_rate}")
+    logging.info(f"Total episodes: {total_episodes}")
     message = f"Current total success rate: {success_rate:.4f}\n"  # 可选：格式化小数位
 
     with open("success_rate1.txt", "a") as f:
         f.write(message)
+    results_dir = pathlib.Path(args.results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    model_name = args.model_name
+    log_suffix = f"model{model_name}_task{args.task_suite_name}_seed{args.seed}_h{args.action_horizon}"
+    result_path = f"{results_dir}/libero_eval_{log_suffix}.json"
+    result = {
+        "model_name": model_name,
+        "task_suite_name": args.task_suite_name,
+        "random_seed": args.seed,
+        "action_horizon": args.action_horizon,
+        "num_trials_per_task": args.num_trials_per_task,
+        "total_episodes": total_episodes,
+        "total_successes": total_successes,
+        "success_rate": success_rate,
+        "success_percent": success_rate * 100.0,
+        "task_results": task_results,
+    }
+    with open(result_path, "w") as f:
+        json.dump(result, f, indent=2)
+    print(f"Results saved to {result_path}")
     # print(summery)
 
 
