@@ -17,7 +17,24 @@ import openpi.models.model as _model
 import openpi.models.pi0_config as pi0_config
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
-import openpi.models_pytorch.lora_pytorch as lora_pytorch
+try:
+    import openpi.models_pytorch.lora_pytorch as lora_pytorch
+except ImportError:
+    @dataclasses.dataclass(frozen=True)
+    class _LoRATrainingConfig:
+        enabled: bool = False
+        attn_rank: int = 16
+        ffn_rank: int = 16
+        attn_alpha: float = 16.0
+        ffn_alpha: float = 16.0
+        use_rslora: bool = False
+        dropout: float = 0.0
+        apply_to: str = "all"
+        train_non_lora_layers: bool = True
+        train_vision_encoder: bool = True
+
+    class lora_pytorch:  # type: ignore
+        LoRATrainingConfig = _LoRATrainingConfig
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
@@ -136,6 +153,29 @@ class ModelTransformFactory(GroupFactory):
                 )
             case _model.ModelType.PI05:
                 assert isinstance(model_config, pi0_config.Pi0Config)
+                if model_config.knowledge_insulation:
+                    tokenizer_cls = (
+                        _tokenizer.FASTTokenizer
+                        if model_config.fast_model_tokenizer is None
+                        else model_config.fast_model_tokenizer
+                    )
+                    tokenizer_kwargs = (
+                        {}
+                        if model_config.fast_model_tokenizer_kwargs is None
+                        else model_config.fast_model_tokenizer_kwargs
+                    )
+                    return _transforms.Group(
+                        inputs=[
+                            _transforms.InjectDefaultPrompt(self.default_prompt),
+                            _transforms.ResizeImages(224, 224),
+                            _transforms.TokenizeKIPrompt(
+                                _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                                tokenizer_cls(model_config.max_token_len, **tokenizer_kwargs),
+                                discrete_state_input=model_config.discrete_state_input,
+                            ),
+                            _transforms.PadStatesAndActions(model_config.action_dim),
+                        ],
+                    )
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
@@ -844,6 +884,42 @@ _CONFIGS = [
             pi05=True,
             action_horizon=10,
             discrete_state_input=False,
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m",
+        ),
+        data=LeRobotLiberoDataConfig(
+            repo_id="physical-intelligence/libero",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=False,
+        ),
+        batch_size=16,
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=10_000,
+            peak_lr=5e-5,
+            decay_steps=1_000_000,
+            decay_lr=5e-5,
+        ),
+        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
+        ema_decay=None,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        pytorch_weight_path=f"{os.getenv('OPENPI_DATA_HOME')}/openpi-assets/checkpoints/pi05_base_torch",
+        num_train_steps=30_000,
+        freeze_filter=nnx.Any(
+            nnx_utils.PathRegex(".*img.*"),
+            nnx.All(
+                nnx_utils.PathRegex(".*llm.*"),
+                nnx.Not(nnx_utils.PathRegex(".*_1.*")),
+                nnx.Not(nnx_utils.PathRegex(".*lora.*")),
+            ),
+        ),
+    ),
+    TrainConfig(
+        name="pi05_libero_ki_vlm_lora_action_expert",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            action_horizon=10,
+            discrete_state_input=True,
+            knowledge_insulation=True,
             paligemma_variant="gemma_2b_lora",
             action_expert_variant="gemma_300m",
         ),

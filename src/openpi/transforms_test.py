@@ -78,6 +78,28 @@ def test_tokenize_prompt():
     assert np.allclose(tok_mask, data["tokenized_prompt_mask"])
 
 
+def test_tokenize_ki_prompt():
+    tokenizer = _tokenizer.PaligemmaTokenizer(max_len=128)
+    fast_tokenizer = _tokenizer.FASTTokenizer(max_len=128)
+    transform = _transforms.TokenizeKIPrompt(tokenizer, fast_tokenizer)
+
+    item = {
+        "prompt": "Pick up the cup",
+        "state": np.zeros(7, dtype=np.float32),
+        "actions": np.zeros((3, 2), dtype=np.float32),
+    }
+    data = transform(item)
+
+    assert data["tokenized_prompt"].shape == (128,)
+    assert data["tokenized_prompt_mask"].shape == (128,)
+    assert data["ki_tokenized_prompt"].shape == (128,)
+    assert data["ki_tokenized_prompt_mask"].shape == (128,)
+    assert data["ki_token_ar_mask"].shape == (128,)
+    assert data["ki_token_loss_mask"].shape == (128,)
+    assert np.any(data["ki_token_loss_mask"])
+    assert "actions" in data
+
+
 def test_tokenize_no_prompt():
     transform = _transforms.TokenizePrompt(_tokenizer.PaligemmaTokenizer())
 

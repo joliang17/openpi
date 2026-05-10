@@ -15,17 +15,18 @@ import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
 import safetensors
-import torch
+try:
+    import torch
+except ImportError:
+    torch = None
 
-from openpi.models_pytorch import pi0_pytorch
-from openpi.models_pytorch import lora_pytorch
 from openpi.shared import image_tools
 import openpi.shared.array_typing as at
 
 logger = logging.getLogger("openpi")
 
 # Type variable for array types (JAX arrays, PyTorch tensors, or numpy arrays)
-ArrayT = TypeVar("ArrayT", bound=jax.Array | torch.Tensor | np.ndarray)
+ArrayT = TypeVar("ArrayT", bound=jax.Array | np.ndarray)
 
 
 class ModelType(enum.Enum):
@@ -69,6 +70,10 @@ IMAGE_RESOLUTION = (224, 224)
 #     "tokenized_prompt_mask": bool[*b, l],  # Optional, mask for tokenized prompt
 #     "token_ar_mask": int32[*b, l],  # Optional, autoregressive mask for FAST model
 #     "token_loss_mask": bool[*b, l],  # Optional, loss mask for FAST model
+#     "ki_tokenized_prompt": int32[*b, l],  # Optional, FAST-tokenized KI auxiliary sequence
+#     "ki_tokenized_prompt_mask": bool[*b, l],  # Optional, mask for KI auxiliary sequence
+#     "ki_token_ar_mask": int32[*b, l],  # Optional, autoregressive mask for KI auxiliary sequence
+#     "ki_token_loss_mask": bool[*b, l],  # Optional, loss mask for KI auxiliary sequence
 #
 #      # Actions data.
 #      "actions": float32[*b ah ad]
@@ -107,6 +112,12 @@ class Observation(Generic[ArrayT]):
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
+    # pi0.5 knowledge-insulation auxiliary FAST token fields.
+    ki_tokenized_prompt: at.Int[ArrayT, "*b l"] | None = None
+    ki_tokenized_prompt_mask: at.Bool[ArrayT, "*b l"] | None = None
+    ki_token_ar_mask: at.Int[ArrayT, "*b l"] | None = None
+    ki_token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
+
     # Optional skill labels for skill-router experiments.
     skill_id: at.Int[ArrayT, "*b"] | None = None
     skill_mask: at.Bool[ArrayT, "*b"] | None = None
@@ -121,7 +132,7 @@ class Observation(Generic[ArrayT]):
         for key in data["image"]:
             if data["image"][key].dtype == np.uint8:
                 data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
-            elif hasattr(data["image"][key], "dtype") and data["image"][key].dtype == torch.uint8:
+            elif torch is not None and hasattr(data["image"][key], "dtype") and data["image"][key].dtype == torch.uint8:
                 data["image"][key] = data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
         return cls(
             images=data["image"],
@@ -131,6 +142,10 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            ki_tokenized_prompt=data.get("ki_tokenized_prompt"),
+            ki_tokenized_prompt_mask=data.get("ki_tokenized_prompt_mask"),
+            ki_token_ar_mask=data.get("ki_token_ar_mask"),
+            ki_token_loss_mask=data.get("ki_token_loss_mask"),
             skill_id=data.get("skill_id"),
             skill_mask=data.get("skill_mask"),
         )
@@ -212,6 +227,10 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        ki_tokenized_prompt=observation.ki_tokenized_prompt,
+        ki_tokenized_prompt_mask=observation.ki_tokenized_prompt_mask,
+        ki_token_ar_mask=observation.ki_token_ar_mask,
+        ki_token_loss_mask=observation.ki_token_loss_mask,
         skill_id=observation.skill_id,
         skill_mask=observation.skill_mask,
     )
@@ -250,6 +269,9 @@ class BaseModelConfig(abc.ABC):
         return nnx.merge(graphdef, state)
 
     def load_pytorch(self, train_config, weight_path: str):
+        from openpi.models_pytorch import lora_pytorch
+        from openpi.models_pytorch import pi0_pytorch
+
         logger.info(f"train_config: {train_config}")
         model = pi0_pytorch.PI0Pytorch(config=train_config.model)
 

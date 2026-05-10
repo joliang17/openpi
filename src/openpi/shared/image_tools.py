@@ -1,9 +1,15 @@
+from __future__ import annotations
+
 import functools
 
 import jax
 import jax.numpy as jnp
-import torch
-import torch.nn.functional as F  # noqa: N812
+try:
+    import torch
+    import torch.nn.functional as F  # noqa: N812
+except ImportError:
+    torch = None
+    F = None
 
 import openpi.shared.array_typing as at
 
@@ -70,6 +76,9 @@ def resize_with_pad_torch(
     Returns:
         Resized and padded tensor with same shape format as input
     """
+    if torch is None or F is None:
+        raise ImportError("PyTorch is required for resize_with_pad_torch.")
+
     # Check if input is in channels-last format [*b, h, w, c] or channels-first [*b, c, h, w]
     if images.shape[-1] <= 4:  # Assume channels-last format
         channels_last = True

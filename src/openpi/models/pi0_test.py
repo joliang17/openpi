@@ -77,3 +77,40 @@ def test_pi05_freeze_vlm_filter():
     assert any("time_mlp_in" in path for path in trainable_state)
     assert any("time_mlp_out" in path for path in trainable_state)
     assert any("action_out_proj" in path for path in trainable_state)
+
+
+def test_pi05_ki_vlm_lora_action_expert_filter():
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        action_horizon=10,
+        discrete_state_input=True,
+        knowledge_insulation=True,
+        paligemma_variant="gemma_2b_lora",
+        action_expert_variant="gemma_300m",
+    )
+    freeze_filter = nnx.Any(
+        nnx_utils.PathRegex(".*img.*"),
+        nnx.All(
+            nnx_utils.PathRegex(".*llm.*"),
+            nnx.Not(nnx_utils.PathRegex(".*_1.*")),
+            nnx.Not(nnx_utils.PathRegex(".*lora.*")),
+        ),
+    )
+
+    trainable_filter = nnx.All(nnx.Param, nnx.Not(freeze_filter))
+    trainable_state = _get_filtered_state(config, trainable_filter)
+    frozen_state = _get_filtered_state(config, freeze_filter)
+
+    assert any(any("lora" in part for part in path) for path in trainable_state)
+    assert any(any("_1" in part for part in path) for path in trainable_state)
+    assert any("action_in_proj" in path for path in trainable_state)
+    assert any("action_out_proj" in path for path in trainable_state)
+    assert any("img" in path for path in frozen_state)
+    assert all(
+        not (
+            "llm" in path
+            and not any("_1" in part for part in path)
+            and not any("lora" in part for part in path)
+        )
+        for path in trainable_state
+    )

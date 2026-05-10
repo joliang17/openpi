@@ -267,6 +267,38 @@ class TokenizePrompt(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class TokenizeKIPrompt(DataTransformFn):
+    tokenizer: _tokenizer.PaligemmaTokenizer
+    fast_tokenizer: _tokenizer.FASTTokenizer
+    discrete_state_input: bool = True
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if (prompt := data.pop("prompt", None)) is None:
+            raise ValueError("Prompt is required")
+
+        if (state := data.get("state", None)) is None:
+            raise ValueError("State is required.")
+
+        if not isinstance(prompt, str):
+            prompt = prompt.item()
+
+        prompt_state = state if self.discrete_state_input else None
+        tokens, token_masks = self.tokenizer.tokenize(prompt, prompt_state)
+        ki_tokens, ki_token_mask, ki_ar_mask, ki_loss_mask = self.fast_tokenizer.tokenize(
+            prompt, state, data.get("actions")
+        )
+        return {
+            **data,
+            "tokenized_prompt": tokens,
+            "tokenized_prompt_mask": token_masks,
+            "ki_tokenized_prompt": ki_tokens,
+            "ki_tokenized_prompt_mask": ki_token_mask,
+            "ki_token_ar_mask": ki_ar_mask,
+            "ki_token_loss_mask": ki_loss_mask,
+        }
+
+
+@dataclasses.dataclass(frozen=True)
 class TokenizeFASTInputs(DataTransformFn):
     tokenizer: _tokenizer.FASTTokenizer
 

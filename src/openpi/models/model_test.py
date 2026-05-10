@@ -1,5 +1,6 @@
 from flax import nnx
 import jax
+import jax.numpy as jnp
 import pytest
 
 from openpi.models import model as _model
@@ -37,6 +38,50 @@ def test_pi0_lora_model():
 
     actions = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=10)
     assert actions.shape == (batch_size, model.action_horizon, model.action_dim)
+
+
+def test_pi05_ki_dummy_model():
+    key = jax.random.key(0)
+    config = pi0_config.Pi0Config(
+        pi05=True,
+        knowledge_insulation=True,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        action_dim=2,
+        action_horizon=2,
+        max_token_len=16,
+    )
+    model = config.create(key)
+
+    batch_size = 2
+    obs, act = config.fake_obs(batch_size), config.fake_act(batch_size)
+    obs = obs.replace(
+        image_masks={k: jnp.ones((batch_size,), dtype=jnp.bool_) for k in obs.images},
+        tokenized_prompt=jnp.ones((batch_size, config.max_token_len), dtype=jnp.int32),
+        tokenized_prompt_mask=jnp.ones((batch_size, config.max_token_len), dtype=jnp.bool_),
+        ki_tokenized_prompt=jnp.ones((batch_size, config.max_token_len), dtype=jnp.int32),
+        ki_tokenized_prompt_mask=jnp.ones((batch_size, config.max_token_len), dtype=jnp.bool_),
+        ki_token_ar_mask=jnp.concatenate(
+            [
+                jnp.zeros((batch_size, config.max_token_len // 2), dtype=jnp.int32),
+                jnp.ones((batch_size, config.max_token_len // 2), dtype=jnp.int32),
+            ],
+            axis=1,
+        ),
+        ki_token_loss_mask=jnp.concatenate(
+            [
+                jnp.zeros((batch_size, config.max_token_len // 2), dtype=jnp.bool_),
+                jnp.ones((batch_size, config.max_token_len // 2), dtype=jnp.bool_),
+            ],
+            axis=1,
+        ),
+    )
+
+    loss, info = nnx_utils.module_jit(model.compute_loss)(key, obs, act)
+    assert loss.shape == (batch_size, config.action_horizon)
+    assert "action_loss" in info
+    assert "ki_ce_loss" in info
+    assert "ki_token_accuracy" in info
 
 
 def test_pi0_fast_model():

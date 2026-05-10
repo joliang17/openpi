@@ -1,5 +1,5 @@
 import dataclasses
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import flax.nnx as nnx
 import jax
@@ -32,6 +32,14 @@ class Pi0Config(_model.BaseModelConfig):
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
+    # If true, train pi0.5 with knowledge insulation: the action expert receives stopped-gradient VLM
+    # features while the VLM is adapted with an auxiliary FAST-token action prediction objective.
+    knowledge_insulation: bool = False
+    ki_loss_weight: float = 1.0
+    action_loss_weight: float = 1.0
+    fast_model_tokenizer: Any | None = None
+    fast_model_tokenizer_kwargs: dict[str, Any] | None = None
+
     # Optional pi0.5 skill-router experiment. Disabled by default.
     use_skill_router: bool = False
     num_skills: int = 0
@@ -42,6 +50,9 @@ class Pi0Config(_model.BaseModelConfig):
     skill_emb_div_loss_weight: float = 0.01
     skill_emb_norm_loss_weight: float = 0.001
     use_skill_action_film: bool = True
+    skill_inject_adarms: bool = True       # add skill to time_emb for adaRMS (pi05 only)
+    skill_inject_vlm_hidden: bool = False  # add skill to VLM prefix input embeddings
+    skill_inject_state_token: bool = False # add skill to state token in suffix (pi0 only)
 
     pytorch_compile_mode: str | None = "max-autotune"
 
@@ -57,13 +68,17 @@ class Pi0Config(_model.BaseModelConfig):
                 "max-autotune",
                 "max-autotune-no-cudagraphs",
             ]
+        if self.knowledge_insulation and not self.pi05:
+            raise ValueError("knowledge_insulation is implemented for pi0.5 only.")
         if self.use_skill_router:
-            if not self.pi05:
-                raise ValueError("Skill-router conditioning is implemented for pi0.5 only.")
             if self.num_skills <= 0:
                 raise ValueError("num_skills must be positive when use_skill_router=True.")
             if self.skill_stage not in ("classifier", "action"):
                 raise ValueError("skill_stage must be 'classifier' or 'action'.")
+            if self.skill_inject_adarms and not self.pi05:
+                raise ValueError("skill_inject_adarms requires pi05=True (adaRMS is only used in pi0.5).")
+            if self.skill_inject_state_token and self.pi05:
+                raise ValueError("skill_inject_state_token requires pi05=False (pi0.5 has no state token in the suffix).")
 
     @property
     @override
@@ -98,6 +113,26 @@ class Pi0Config(_model.BaseModelConfig):
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                ki_tokenized_prompt=(
+                    jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32)
+                    if self.knowledge_insulation
+                    else None
+                ),
+                ki_tokenized_prompt_mask=(
+                    jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool)
+                    if self.knowledge_insulation
+                    else None
+                ),
+                ki_token_ar_mask=(
+                    jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32)
+                    if self.knowledge_insulation
+                    else None
+                ),
+                ki_token_loss_mask=(
+                    jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.bool_)
+                    if self.knowledge_insulation
+                    else None
+                ),
                 skill_id=jax.ShapeDtypeStruct([batch_size], jnp.int32) if self.use_skill_router else None,
                 skill_mask=jax.ShapeDtypeStruct([batch_size], jnp.bool_) if self.use_skill_router else None,
             )
