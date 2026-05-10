@@ -1,5 +1,16 @@
 #!/bin/bash
 
+
+#SBATCH --job-name=eval_openpi
+#SBATCH --output=slurm_output/eval_openpi.log
+#SBATCH --error=slurm_output/eval_openpi.log
+#SBATCH --time=72:00:00
+#SBATCH --account=scavenger
+#SBATCH --partition=scavenger
+#SBATCH --gres=gpu:rtxa5000:1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=64G
+
 set -euo pipefail
 
 cd /fs/nexus-scratch/yliang17/Research/VLA/openpi
@@ -35,6 +46,9 @@ SEEDS="${SEEDS:-7 42 100}"
 REPLAN_STEPS="${REPLAN_STEPS:-5 10}"
 SERVER_READY_WAIT="${SERVER_READY_WAIT:-120}"
 STATUS_DIR="${STATUS_DIR:-data/pi05_action_expert_eval_status}"
+RESULTS_DIR="${RESULTS_DIR:-results}"
+SKIP_COMPLETED_RESULTS="${SKIP_COMPLETED_RESULTS:-1}"
+EVAL_TYPES="${EVAL_TYPES:-libero10 libero_pro}"
 
 mkdir -p "${STATUS_DIR}"
 
@@ -92,6 +106,17 @@ parse_libero_pro_success_percent() {
   grep "^Final:" "${log_path}" | tail -n 1 | sed -E 's/.* = ([0-9.]+)%.*/\1/'
 }
 
+result_path_for() {
+  local seed="$1"
+  local steps="$2"
+  printf '%s/libero_eval_modelopenpi_tasklibero_10_seed%s_h%s.json' "${RESULTS_DIR}" "${seed}" "${steps}"
+}
+
+should_run_eval_type() {
+  local eval_type="$1"
+  [[ " ${EVAL_TYPES} " == *" ${eval_type} "* ]]
+}
+
 initialize_status_files() {
   for seed in ${SEEDS}; do
     for steps in ${REPLAN_STEPS}; do
@@ -122,8 +147,16 @@ run_libero10_eval() {
   local log_path="logs/pi05_action_expert_libero10_seed${seed}_steps${steps}.log"
   local video_out_path="data/pi05_action_expert_libero10/videos/seed${seed}_steps${steps}"
   local status_file="${STATUS_DIR}/libero10_seed${seed}_steps${steps}.json"
+  local result_path
+  result_path="$(result_path_for "${seed}" "${steps}")"
   local started_at
   started_at="$(date -Iseconds)"
+
+  if [[ "${SKIP_COMPLETED_RESULTS}" == "1" && -s "${result_path}" ]]; then
+    echo "Skipping libero10 seed=${seed} steps=${steps}; found ${result_path}"
+    write_status_json "${status_file}" "libero10" "${seed}" "${steps}" "skipped" "${log_path}" "${video_out_path}" "0" "" "" "${started_at}" "$(date -Iseconds)"
+    return 0
+  fi
 
   write_status_json "${status_file}" "libero10" "${seed}" "${steps}" "running" "${log_path}" "${video_out_path}" "" "" "" "${started_at}"
 
@@ -133,7 +166,9 @@ run_libero10_eval() {
     --args.task-suite-name libero_10 \
     --args.seed "${seed}" \
     --args.replan-steps "${steps}" \
+    --args.action-horizon "${steps}" \
     --args.num-trials-per-task "${NUM_TRIALS_PER_TASK}" \
+    --args.results-dir "${RESULTS_DIR}" \
     --args.video-out-path "${video_out_path}" \
     2>&1 | tee "${log_path}"
   local exit_code="${PIPESTATUS[0]}"
@@ -158,8 +193,16 @@ run_libero_pro_eval() {
   local log_path="logs/pi05_action_expert_libero_pro_${PERTURBATION_TYPE}_seed${seed}_steps${steps}.log"
   local video_out_path="data/pi05_action_expert_libero_pro/videos/seed${seed}_steps${steps}"
   local status_file="${STATUS_DIR}/libero_pro_${PERTURBATION_TYPE}_seed${seed}_steps${steps}.json"
+  local result_path
+  result_path="$(result_path_for "${seed}" "${steps}")"
   local started_at
   started_at="$(date -Iseconds)"
+
+  if [[ "${SKIP_COMPLETED_RESULTS}" == "1" && -s "${result_path}" ]]; then
+    echo "Skipping libero_pro seed=${seed} steps=${steps}; found ${result_path}"
+    write_status_json "${status_file}" "libero_pro" "${seed}" "${steps}" "skipped" "${log_path}" "${video_out_path}" "0" "" "" "${started_at}" "$(date -Iseconds)"
+    return 0
+  fi
 
   write_status_json "${status_file}" "libero_pro" "${seed}" "${steps}" "running" "${log_path}" "${video_out_path}" "" "" "" "${started_at}"
 
@@ -169,7 +212,9 @@ run_libero_pro_eval() {
     --perturbation_type "${PERTURBATION_TYPE}" \
     --seed "${seed}" \
     --replan_steps "${steps}" \
+    --action_horizon "${steps}" \
     --num_trials_per_task "${NUM_TRIALS_PER_TASK}" \
+    --results_dir "${RESULTS_DIR}" \
     --port "${PORT}" \
     --video_out_path "${video_out_path}" \
     2>&1 | tee "${log_path}"
@@ -211,7 +256,11 @@ export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
 for SEED in ${SEEDS}; do
   for STEPS in ${REPLAN_STEPS}; do
-    run_libero10_eval "${SEED}" "${STEPS}"
-    run_libero_pro_eval "${SEED}" "${STEPS}"
+    if should_run_eval_type "libero10"; then
+      run_libero10_eval "${SEED}" "${STEPS}"
+    fi
+    if should_run_eval_type "libero_pro"; then
+      run_libero_pro_eval "${SEED}" "${STEPS}"
+    fi
   done
 done
