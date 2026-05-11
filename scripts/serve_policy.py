@@ -2,7 +2,9 @@ import dataclasses
 import enum
 import logging
 import socket
+import time
 
+import numpy as np
 import tyro
 
 from openpi.policies import policy as _policy
@@ -54,6 +56,12 @@ class Args:
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
     policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
 
+    # Number of dummy inference calls to run before opening the WebSocket port. The first call triggers
+    # JAX JIT compilation; without warm-up the first 1-2 episodes pay that cost and typically fail.
+    warmup_steps: int = 2
+    # Skip the warm-up entirely (e.g. for environments without a dummy obs builder).
+    skip_warmup: bool = False
+
 
 # Default checkpoints that should be used for each environment.
 DEFAULT_CHECKPOINT: dict[EnvMode, Checkpoint] = {
@@ -96,6 +104,35 @@ def create_policy(args: Args) -> _policy.Policy:
             return create_default_policy(args.env, default_prompt=args.default_prompt)
 
 
+def _build_dummy_obs(env: EnvMode) -> dict | None:
+    """Build a fake observation that matches the eval client's schema for the given env."""
+    if env == EnvMode.LIBERO:
+        # Mirrors examples/libero/main.py:149-160.
+        return {
+            "observation/image": np.zeros((224, 224, 3), dtype=np.uint8),
+            "observation/wrist_image": np.zeros((224, 224, 3), dtype=np.uint8),
+            "observation/state": np.zeros((8,), dtype=np.float32),
+            "prompt": "warmup",
+        }
+    # TODO: add ALOHA / ALOHA_SIM / DROID dummy obs when those envs are evaluated.
+    return None
+
+
+def warmup_policy(policy: _policy.Policy, env: EnvMode, steps: int) -> None:
+    """Run `steps` dummy inference calls so JAX JIT compiles before any client connects."""
+    if steps <= 0:
+        return
+    dummy = _build_dummy_obs(env)
+    if dummy is None:
+        logging.warning("No warm-up dummy obs defined for env=%s; skipping warm-up.", env)
+        return
+    for i in range(steps):
+        t0 = time.monotonic()
+        policy.infer(dummy)
+        logging.info("Warm-up step %d/%d: %.2fs", i + 1, steps, time.monotonic() - t0)
+    logging.info("Policy warm-up complete; ready to accept connections.")
+
+
 def main(args: Args) -> None:
     policy = create_policy(args)
     policy_metadata = policy.metadata
@@ -103,6 +140,9 @@ def main(args: Args) -> None:
     # Record the policy's behavior.
     if args.record:
         policy = _policy.PolicyRecorder(policy, "policy_records")
+
+    if not args.skip_warmup:
+        warmup_policy(policy, args.env, args.warmup_steps)
 
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)
