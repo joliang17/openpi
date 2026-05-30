@@ -101,13 +101,18 @@ class Pi0(_model.BaseModel):
         self.use_skill_router = config.use_skill_router
         self.skill_stage = config.skill_stage
         self.num_skills = config.num_skills
+        self.use_skill_effect_gate = config.use_skill_effect_gate
+        self.skill_effect_gate_source = config.skill_effect_gate_source
+        self.skill_effect_gate_eval_mode = config.skill_effect_gate_eval_mode
         self.use_skill_action_film = config.use_skill_action_film
+        self.use_skill_action_film_gate = config.use_skill_action_film_gate
         self.skill_inject_adarms = config.skill_inject_adarms
         self.skill_inject_vlm_hidden = config.skill_inject_vlm_hidden
         self.skill_inject_state_token = config.skill_inject_state_token
         self.skill_clf_loss_weight = config.skill_clf_loss_weight
         self.skill_emb_div_loss_weight = config.skill_emb_div_loss_weight
         self.skill_emb_norm_loss_weight = config.skill_emb_norm_loss_weight
+        self.skill_eval_mode = config.skill_eval_mode
         self.knowledge_insulation = config.knowledge_insulation
         self.ki_loss_weight = config.ki_loss_weight
         self.action_loss_weight = config.action_loss_weight
@@ -119,10 +124,29 @@ class Pi0(_model.BaseModel):
             self.skill_emb_bank = nnx.Param(
                 jax.random.normal(rngs.params(), (config.num_skills, config.skill_emb_dim)) * 0.02
             )
+            if config.use_skill_effect_gate:
+                effect_gate_in_dim = (
+                    config.skill_emb_dim
+                    if config.skill_effect_gate_source == "skill_emb"
+                    else config.skill_router_hidden_dim
+                )
+                self.skill_effect_gate = nnx.Linear(effect_gate_in_dim, 1, rngs=rngs)
+                if config.skill_effect_gate_logit_bias != 0.0:
+                    self.skill_effect_gate.bias.value = jnp.full_like(
+                        self.skill_effect_gate.bias.value,
+                        config.skill_effect_gate_logit_bias,
+                    )
             if config.skill_inject_adarms:
                 self.skill_to_adarms = nnx.Linear(config.skill_emb_dim, action_expert_config.width, rngs=rngs)
             if config.use_skill_action_film:
                 self.skill_to_action_film = nnx.Linear(config.skill_emb_dim, 2 * action_expert_config.width, rngs=rngs)
+                if config.use_skill_action_film_gate:
+                    self.skill_to_action_film_gate = nnx.Linear(config.skill_emb_dim, 1, rngs=rngs)
+                    if config.skill_action_gate_logit_bias != 0.0:
+                        self.skill_to_action_film_gate.bias.value = jnp.full_like(
+                            self.skill_to_action_film_gate.bias.value,
+                            config.skill_action_gate_logit_bias,
+                        )
             if config.skill_inject_vlm_hidden:
                 self.skill_to_vlm_hidden = nnx.Linear(config.skill_emb_dim, paligemma_config.width, rngs=rngs)
             if config.skill_inject_state_token:
@@ -131,30 +155,98 @@ class Pi0(_model.BaseModel):
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
 
-    def _classify_skill(
+    def _skill_hidden(
         self, prefix_out: at.Float[at.Array, "b s emb"], prefix_mask: at.Bool[at.Array, "b s"]
-    ) -> at.Float[at.Array, "b n"]:
+    ) -> at.Float[at.Array, "b h"]:
         mask = prefix_mask.astype(prefix_out.dtype)[..., None]
         pooled = jnp.sum(prefix_out * mask, axis=1) / jnp.clip(jnp.sum(mask, axis=1), 1.0)
         hidden = self.skill_pool_proj(pooled)
-        hidden = nnx.swish(hidden)
-        return self.skill_classifier(hidden)
+        return nnx.swish(hidden)
+
+    def _classify_skill(
+        self, prefix_out: at.Float[at.Array, "b s emb"], prefix_mask: at.Bool[at.Array, "b s"]
+    ) -> at.Float[at.Array, "b n"]:
+        return self.skill_classifier(self._skill_hidden(prefix_out, prefix_mask))
 
     def _skill_condition(
-        self, skill_logits: at.Float[at.Array, "b n"]
+        self,
+        skill_logits: at.Float[at.Array, "b n"],
+        skill_hidden: at.Float[at.Array, "b h"] | None = None,
+        *,
+        eval_mode: str = "normal",
+        effect_gate_eval_mode: str = "normal",
+        rng: at.KeyArrayLike | None = None,
     ) -> tuple[
         at.Float[at.Array, "b emb"] | None,
         at.Float[at.Array, "b emb2"] | None,
         at.Float[at.Array, "b emb3"] | None,
         at.Float[at.Array, "b emb4"] | None,
+        at.Float[at.Array, "b 1"] | None,
+        at.Float[at.Array, "b 1"] | None,
     ]:
         skill_probs = jax.nn.softmax(skill_logits, axis=-1)
-        skill_emb = skill_probs @ self.skill_emb_bank.value
+        skill_bank = self.skill_emb_bank.value
+        if eval_mode == "shuffle":
+            # Inference ablation: randomly permute the skill embedding bank rows
+            # so the router's selected skill maps to a different skill's
+            # embedding. If performance is unaffected, the skill routing is not
+            # contributing meaningful signal.
+            if rng is None:
+                raise ValueError("skill_eval_mode='shuffle' requires an rng.")
+            perm = jax.random.permutation(rng, self.num_skills)
+            skill_bank = skill_bank[perm]
+        skill_emb = skill_probs @ skill_bank
+        if eval_mode == "zero":
+            # Inference ablation: drop skill conditioning entirely.
+            skill_emb = jnp.zeros_like(skill_emb)
+        skill_effect_gate = None
+        if self.use_skill_effect_gate:
+            if self.skill_effect_gate_source == "prefix_hidden":
+                if skill_hidden is None:
+                    raise ValueError("skill_effect_gate_source='prefix_hidden' requires skill_hidden.")
+                effect_gate_input = skill_hidden
+            else:
+                effect_gate_input = skill_emb
+            skill_effect_gate = jax.nn.sigmoid(self.skill_effect_gate(effect_gate_input))
+            if effect_gate_eval_mode == "zero":
+                skill_effect_gate = jnp.zeros_like(skill_effect_gate)
+            elif effect_gate_eval_mode == "one":
+                skill_effect_gate = jnp.ones_like(skill_effect_gate)
+            skill_emb = skill_effect_gate * skill_emb
         adarms_skill_cond = self.skill_to_adarms(skill_emb) if self.skill_inject_adarms else None
         action_film = self.skill_to_action_film(skill_emb) if self.use_skill_action_film else None
+        action_film_gate = None
+        if self.use_skill_action_film_gate:
+            action_film_gate = jax.nn.sigmoid(self.skill_to_action_film_gate(skill_emb))
+            if eval_mode == "gate_zero":
+                action_film_gate = jnp.zeros_like(action_film_gate)
+            elif eval_mode == "gate_one":
+                action_film_gate = jnp.ones_like(action_film_gate)
         vlm_delta = self.skill_to_vlm_hidden(skill_emb) if self.skill_inject_vlm_hidden else None
         state_cond = self.skill_to_state(skill_emb) if self.skill_inject_state_token else None
-        return adarms_skill_cond, action_film, vlm_delta, state_cond
+        return adarms_skill_cond, action_film, vlm_delta, state_cond, action_film_gate, skill_effect_gate
+
+    def _skill_gate_info(
+        self,
+        skill_logits: at.Float[at.Array, "b n"] | None,
+        gate: at.Float[at.Array, "b 1"] | None,
+        prefix: str,
+    ) -> dict[str, at.Array]:
+        if skill_logits is None or gate is None:
+            return {}
+        gate = gate[:, 0]
+        pred_skill = jnp.argmax(skill_logits, axis=-1)
+        info = {
+            f"{prefix}_mean": jnp.mean(gate),
+            f"{prefix}_std": jnp.std(gate),
+            f"{prefix}_min": jnp.min(gate),
+            f"{prefix}_max": jnp.max(gate),
+        }
+        for skill_id in range(self.num_skills):
+            mask = pred_skill == skill_id
+            denom = jnp.clip(jnp.sum(mask), 1)
+            info[f"{prefix}_skill_{skill_id}"] = jnp.sum(jnp.where(mask, gate, 0.0)) / denom
+        return info
 
     def _skill_losses(
         self, skill_logits: at.Float[at.Array, "b n"], obs: _model.Observation
@@ -254,6 +346,7 @@ class Pi0(_model.BaseModel):
         skill_adarms_cond: at.Float[at.Array, "b emb"] | None = None,
         skill_action_film: at.Float[at.Array, "b emb2"] | None = None,
         skill_state_cond: at.Float[at.Array, "b emb3"] | None = None,
+        skill_action_film_gate: at.Float[at.Array, "b 1"] | None = None,
     ) -> tuple[
         at.Float[at.Array, "b s emb"],
         at.Bool[at.Array, "b s"],
@@ -276,6 +369,9 @@ class Pi0(_model.BaseModel):
         action_tokens = self.action_in_proj(noisy_actions)
         if skill_action_film is not None:
             gamma, beta = jnp.split(skill_action_film, 2, axis=-1)
+            if skill_action_film_gate is not None:
+                gamma = skill_action_film_gate * gamma
+                beta = skill_action_film_gate * beta
             action_tokens = action_tokens * (1.0 + gamma[:, None, :]) + beta[:, None, :]
         # embed timestep using sine-cosine positional encoding with sensitivity in the range [0, 1]
         time_emb = posemb_sincos(timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0)
@@ -361,13 +457,27 @@ class Pi0(_model.BaseModel):
         skill_adarms_cond = None
         skill_action_film = None
         skill_state_cond = None
+        skill_action_film_gate = None
+        skill_effect_gate = None
         if self.use_skill_router:
-            skill_logits = self._classify_skill(prefix_out, prefix_mask)
-            skill_adarms_cond, skill_action_film, vlm_delta, skill_state_cond = self._skill_condition(skill_logits)
+            skill_hidden = self._skill_hidden(prefix_out, prefix_mask)
+            skill_logits = self.skill_classifier(skill_hidden)
+            (
+                skill_adarms_cond,
+                skill_action_film,
+                vlm_delta,
+                skill_state_cond,
+                skill_action_film_gate,
+                skill_effect_gate,
+            ) = self._skill_condition(skill_logits, skill_hidden)
             if self.skill_stage == "classifier":
                 skill_loss, skill_info = self._skill_losses(skill_logits, observation)
                 skill_loss = einops.repeat(skill_loss, "b -> b s", s=self.action_horizon)
-                return self.skill_clf_loss_weight * skill_loss, skill_info
+                return self.skill_clf_loss_weight * skill_loss, {
+                    **skill_info,
+                    **self._skill_gate_info(skill_logits, skill_action_film_gate, "skill_action_gate"),
+                    **self._skill_gate_info(skill_logits, skill_effect_gate, "skill_effect_gate"),
+                }
             if vlm_delta is not None:
                 prefix_tokens_cond = prefix_tokens + vlm_delta[:, None, :]
                 _, prefix_kv_cache = self.PaliGemma.llm(
@@ -379,7 +489,7 @@ class Pi0(_model.BaseModel):
                 prefix_kv_cache = jax.lax.stop_gradient(prefix_kv_cache)
 
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-            observation, x_t, time, skill_adarms_cond, skill_action_film, skill_state_cond
+            observation, x_t, time, skill_adarms_cond, skill_action_film, skill_state_cond, skill_action_film_gate
         )
         suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
         prefix_to_suffix_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
@@ -406,7 +516,13 @@ class Pi0(_model.BaseModel):
                 + self.skill_emb_div_loss_weight * reg["skill_emb_div_loss"]
                 + self.skill_emb_norm_loss_weight * reg["skill_emb_norm_loss"]
             )
-            info = {**info, **skill_info, **reg}
+            info = {
+                **info,
+                **skill_info,
+                **reg,
+                **self._skill_gate_info(skill_logits, skill_action_film_gate, "skill_action_gate"),
+                **self._skill_gate_info(skill_logits, skill_effect_gate, "skill_effect_gate"),
+            }
         return action_loss, info
 
     @override
@@ -436,21 +552,35 @@ class Pi0(_model.BaseModel):
         skill_action_film = None
         skill_state_cond = None
         vlm_delta = None
+        skill_action_film_gate = None
+        skill_effect_gate = None
         if self.use_skill_router:
             prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
             prefix_positions = jnp.cumsum(prefix_mask, axis=1) - 1
             (prefix_out_for_skill, _), _ = self.PaliGemma.llm(
                 [prefix_tokens, None], mask=prefix_attn_mask, positions=prefix_positions, adarms_cond=[None, None]
             )
-            skill_logits = self._classify_skill(prefix_out_for_skill, prefix_mask)
-            skill_adarms_cond, skill_action_film, vlm_delta, skill_state_cond = self._skill_condition(skill_logits)
+            skill_hidden = self._skill_hidden(prefix_out_for_skill, prefix_mask)
+            skill_logits = self.skill_classifier(skill_hidden)
+            (
+                skill_adarms_cond,
+                skill_action_film,
+                vlm_delta,
+                skill_state_cond,
+                skill_action_film_gate,
+                skill_effect_gate,
+            ) = self._skill_condition(skill_logits, skill_hidden)
             if self.skill_stage == "classifier":
                 skill_loss, skill_info = self._skill_losses(skill_logits, observation)
                 skill_loss = einops.repeat(skill_loss, "b -> b s", s=self.action_horizon)
-                return self.skill_clf_loss_weight * skill_loss, skill_info
+                return self.skill_clf_loss_weight * skill_loss, {
+                    **skill_info,
+                    **self._skill_gate_info(skill_logits, skill_action_film_gate, "skill_action_gate"),
+                    **self._skill_gate_info(skill_logits, skill_effect_gate, "skill_effect_gate"),
+                }
 
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-            observation, x_t, time, skill_adarms_cond, skill_action_film, skill_state_cond
+            observation, x_t, time, skill_adarms_cond, skill_action_film, skill_state_cond, skill_action_film_gate
         )
         joint_prefix_tokens = prefix_tokens if vlm_delta is None else prefix_tokens + vlm_delta[:, None, :]
         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
@@ -466,16 +596,20 @@ class Pi0(_model.BaseModel):
             return action_loss
 
         reg = self._skill_embedding_regularizers()
-        _, skill_info = self._skill_losses(skill_logits, observation)
+        skill_loss, skill_info = self._skill_losses(skill_logits, observation)
         total_loss = (
             action_loss
             + self.skill_emb_div_loss_weight * reg["skill_emb_div_loss"]
             + self.skill_emb_norm_loss_weight * reg["skill_emb_norm_loss"]
         )
+        if self.skill_stage == "joint":
+            total_loss = total_loss + self.skill_clf_loss_weight * skill_loss[:, None]
         info = {
             "action_loss": jnp.mean(action_loss),
             **skill_info,
             **reg,
+            **self._skill_gate_info(skill_logits, skill_action_film_gate, "skill_action_gate"),
+            **self._skill_gate_info(skill_logits, skill_effect_gate, "skill_effect_gate"),
         }
         return total_loss, info
 
@@ -506,9 +640,26 @@ class Pi0(_model.BaseModel):
         skill_adarms_cond = None
         skill_action_film = None
         skill_state_cond = None
+        skill_action_film_gate = None
+        skill_effect_gate = None
         if self.use_skill_router:
-            skill_logits = self._classify_skill(prefix_out, prefix_mask)
-            skill_adarms_cond, skill_action_film, vlm_delta, skill_state_cond = self._skill_condition(skill_logits)
+            skill_hidden = self._skill_hidden(prefix_out, prefix_mask)
+            skill_logits = self.skill_classifier(skill_hidden)
+            rng, skill_rng = jax.random.split(rng)
+            (
+                skill_adarms_cond,
+                skill_action_film,
+                vlm_delta,
+                skill_state_cond,
+                skill_action_film_gate,
+                skill_effect_gate,
+            ) = self._skill_condition(
+                skill_logits,
+                skill_hidden,
+                eval_mode=self.skill_eval_mode,
+                effect_gate_eval_mode=self.skill_effect_gate_eval_mode,
+                rng=skill_rng,
+            )
             if vlm_delta is not None:
                 prefix_tokens_cond = prefix_tokens + vlm_delta[:, None, :]
                 _, kv_cache = self.PaliGemma.llm(
@@ -518,7 +669,13 @@ class Pi0(_model.BaseModel):
         def step(carry):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-                observation, x_t, jnp.broadcast_to(time, batch_size), skill_adarms_cond, skill_action_film, skill_state_cond
+                observation,
+                x_t,
+                jnp.broadcast_to(time, batch_size),
+                skill_adarms_cond,
+                skill_action_film,
+                skill_state_cond,
+                skill_action_film_gate,
             )
             # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
             # other

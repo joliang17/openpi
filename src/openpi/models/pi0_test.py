@@ -114,3 +114,97 @@ def test_pi05_ki_vlm_lora_action_expert_filter():
         )
         for path in trainable_state
     )
+
+
+def test_pi05_gated_film_vlm_lora_filter():
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        action_horizon=10,
+        discrete_state_input=False,
+        paligemma_variant="gemma_2b_lora",
+        action_expert_variant="gemma_300m",
+        use_skill_router=True,
+        num_skills=5,
+        skill_stage="joint",
+        skill_inject_adarms=False,
+        use_skill_action_film=True,
+        use_skill_action_film_gate=True,
+    )
+    freeze_filter = nnx.Any(
+        nnx_utils.PathRegex(".*img.*"),
+        nnx.All(
+            nnx_utils.PathRegex(".*llm.*"),
+            nnx.Not(nnx_utils.PathRegex(".*_1.*")),
+            nnx.Not(nnx_utils.PathRegex(".*lora.*")),
+        ),
+    )
+
+    trainable_state = _get_filtered_state(config, nnx.All(nnx.Param, nnx.Not(freeze_filter)))
+    frozen_state = _get_filtered_state(config, freeze_filter)
+
+    assert any("skill_to_action_film_gate" in part for path in trainable_state for part in path)
+    assert any("skill_to_action_film" in part for path in trainable_state for part in path)
+    assert not any("skill_to_adarms" in part for path in trainable_state for part in path)
+    assert any("img" in path for path in frozen_state)
+
+
+def test_pi05_skill_effect_gate_vlm_lora_filter():
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        action_horizon=10,
+        discrete_state_input=False,
+        paligemma_variant="gemma_2b_lora",
+        action_expert_variant="gemma_300m",
+        use_skill_router=True,
+        num_skills=5,
+        skill_stage="joint",
+        use_skill_effect_gate=True,
+        skill_effect_gate_source="skill_emb",
+    )
+    freeze_filter = nnx.All(
+        nnx.Param,
+        nnx.Not(
+            nnx.Any(
+                nnx_utils.PathRegex(".*lora.*"),
+                nnx_utils.PathRegex(".*llm.*_1.*"),
+                nnx_utils.PathRegex(".*action_in_proj.*"),
+                nnx_utils.PathRegex(".*action_out_proj.*"),
+                nnx_utils.PathRegex(".*time_mlp_in.*"),
+                nnx_utils.PathRegex(".*time_mlp_out.*"),
+                nnx_utils.PathRegex(".*skill_pool_proj.*"),
+                nnx_utils.PathRegex(".*skill_classifier.*"),
+                nnx_utils.PathRegex(".*skill_emb_bank.*"),
+                nnx_utils.PathRegex(".*skill_effect_gate.*"),
+                nnx_utils.PathRegex(".*skill_to_adarms.*"),
+                nnx_utils.PathRegex(".*skill_to_action_film.*"),
+            )
+        ),
+    )
+
+    trainable_state = _get_filtered_state(config, nnx.All(nnx.Param, nnx.Not(freeze_filter)))
+
+    assert any("skill_effect_gate" in part for path in trainable_state for part in path)
+    assert any("skill_to_action_film" in part for path in trainable_state for part in path)
+    assert any("skill_to_adarms" in part for path in trainable_state for part in path)
+
+
+def test_pi05_gated_film_lora_filter_keeps_image_encoder_trainable():
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        action_horizon=10,
+        discrete_state_input=False,
+        paligemma_variant="gemma_2b_lora",
+        action_expert_variant="gemma_300m_lora",
+        use_skill_router=True,
+        num_skills=5,
+        skill_stage="joint",
+        skill_inject_adarms=False,
+        use_skill_action_film=True,
+        use_skill_action_film_gate=True,
+    )
+
+    trainable_state = _get_filtered_state(config, nnx.All(nnx.Param, nnx.Not(config.get_freeze_filter())))
+
+    assert any("skill_to_action_film_gate" in part for path in trainable_state for part in path)
+    assert any("img" in path for path in trainable_state)
+    assert any(any("lora" in part for part in path) for path in trainable_state)

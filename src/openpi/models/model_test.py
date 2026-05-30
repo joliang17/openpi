@@ -84,6 +84,71 @@ def test_pi05_ki_dummy_model():
     assert "ki_token_accuracy" in info
 
 
+def test_pi05_gated_film_skill_router_dummy_model():
+    key = jax.random.key(0)
+    config = pi0_config.Pi0Config(
+        pi05=True,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        action_dim=2,
+        action_horizon=2,
+        max_token_len=16,
+        use_skill_router=True,
+        num_skills=5,
+        skill_emb_dim=8,
+        skill_stage="joint",
+        use_skill_effect_gate=True,
+        skill_effect_gate_logit_bias=-2.0,
+        skill_inject_adarms=False,
+        use_skill_action_film=True,
+        use_skill_action_film_gate=True,
+    )
+    model = config.create(key)
+
+    batch_size = 2
+    obs, act = config.fake_obs(batch_size), config.fake_act(batch_size)
+    obs = obs.replace(
+        skill_id=jnp.asarray([0, 1], dtype=jnp.int32),
+        skill_mask=jnp.ones((batch_size,), dtype=jnp.bool_),
+    )
+
+    loss, info = nnx_utils.module_jit(model.compute_loss)(key, obs, act)
+    assert loss.shape == (batch_size, config.action_horizon)
+    assert "skill_action_gate_mean" in info
+    assert "skill_action_gate_std" in info
+    assert "skill_action_gate_skill_0" in info
+    assert "skill_effect_gate_mean" in info
+    assert "skill_effect_gate_std" in info
+    assert "skill_effect_gate_skill_0" in info
+
+
+def test_pi05_skill_effect_gate_config_validation():
+    with pytest.raises(ValueError, match="skill_effect_gate_source"):
+        pi0_config.Pi0Config(
+            pi05=True,
+            use_skill_router=True,
+            num_skills=5,
+            use_skill_effect_gate=True,
+            skill_effect_gate_source="bad",
+        )
+
+    with pytest.raises(ValueError, match="skill_effect_gate_eval_mode"):
+        pi0_config.Pi0Config(
+            pi05=True,
+            use_skill_router=True,
+            num_skills=5,
+            skill_effect_gate_eval_mode="bad",
+        )
+
+    with pytest.raises(ValueError, match="use_skill_effect_gate"):
+        pi0_config.Pi0Config(
+            pi05=True,
+            use_skill_router=True,
+            num_skills=5,
+            skill_effect_gate_eval_mode="zero",
+        )
+
+
 def test_pi0_fast_model():
     key = jax.random.key(0)
     config = pi0_fast.Pi0FASTConfig()

@@ -45,14 +45,29 @@ class Pi0Config(_model.BaseModelConfig):
     num_skills: int = 0
     skill_emb_dim: int = 256
     skill_router_hidden_dim: int = 256
-    skill_stage: str = "action"  # "classifier" or "action"
+    skill_stage: str = "action"  # "classifier", "action", or "joint"
     skill_clf_loss_weight: float = 1.0
     skill_emb_div_loss_weight: float = 0.01
     skill_emb_norm_loss_weight: float = 0.001
+    use_skill_effect_gate: bool = False
+    skill_effect_gate_source: str = "skill_emb"  # "skill_emb" or "prefix_hidden"
+    skill_effect_gate_logit_bias: float = 0.0
+    skill_effect_gate_eval_mode: str = "normal"  # "normal", "zero", or "one"; inference only
     use_skill_action_film: bool = True
+    use_skill_action_film_gate: bool = False
+    skill_action_gate_logit_bias: float = 0.0
     skill_inject_adarms: bool = True       # add skill to time_emb for adaRMS (pi05 only)
     skill_inject_vlm_hidden: bool = False  # add skill to VLM prefix input embeddings
     skill_inject_state_token: bool = False # add skill to state token in suffix (pi0 only)
+    # Inference-time skill ablation (only affects sample_actions, not training):
+    #   "normal"  -> use the routed skill embedding;
+    #   "shuffle" -> randomly permute the skill_emb_bank rows each call, so the
+    #                router's selected skill maps to a different skill's embedding;
+    #   "zero"    -> drop skill conditioning entirely (skill embedding = 0);
+    #   "gate_zero" -> force the action-FiLM skill gate closed;
+    #   "gate_one"  -> force the action-FiLM skill gate open.
+    # Used to test whether the skill routing actually contributes to performance.
+    skill_eval_mode: str = "normal"
 
     pytorch_compile_mode: str | None = "max-autotune"
 
@@ -73,12 +88,24 @@ class Pi0Config(_model.BaseModelConfig):
         if self.use_skill_router:
             if self.num_skills <= 0:
                 raise ValueError("num_skills must be positive when use_skill_router=True.")
-            if self.skill_stage not in ("classifier", "action"):
-                raise ValueError("skill_stage must be 'classifier' or 'action'.")
+            if self.skill_stage not in ("classifier", "action", "joint"):
+                raise ValueError("skill_stage must be 'classifier', 'action', or 'joint'.")
+            if self.skill_eval_mode not in ("normal", "shuffle", "zero", "gate_zero", "gate_one"):
+                raise ValueError("skill_eval_mode must be 'normal', 'shuffle', 'zero', 'gate_zero', or 'gate_one'.")
+            if self.skill_effect_gate_source not in ("skill_emb", "prefix_hidden"):
+                raise ValueError("skill_effect_gate_source must be 'skill_emb' or 'prefix_hidden'.")
+            if self.skill_effect_gate_eval_mode not in ("normal", "zero", "one"):
+                raise ValueError("skill_effect_gate_eval_mode must be 'normal', 'zero', or 'one'.")
+            if self.skill_effect_gate_eval_mode != "normal" and not self.use_skill_effect_gate:
+                raise ValueError("skill_effect_gate_eval_mode ablations require use_skill_effect_gate=True.")
             if self.skill_inject_adarms and not self.pi05:
                 raise ValueError("skill_inject_adarms requires pi05=True (adaRMS is only used in pi0.5).")
             if self.skill_inject_state_token and self.pi05:
                 raise ValueError("skill_inject_state_token requires pi05=False (pi0.5 has no state token in the suffix).")
+            if self.use_skill_action_film_gate and not self.use_skill_action_film:
+                raise ValueError("use_skill_action_film_gate requires use_skill_action_film=True.")
+            if self.skill_eval_mode in ("gate_zero", "gate_one") and not self.use_skill_action_film_gate:
+                raise ValueError("skill_eval_mode gate ablations require use_skill_action_film_gate=True.")
 
     @property
     @override
