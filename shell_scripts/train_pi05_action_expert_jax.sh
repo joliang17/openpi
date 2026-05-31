@@ -29,11 +29,11 @@ export OPENPI_DATA_HOME=$CACHE_DIR
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 export HF_LEROBOT_HOME="/fs/nexus-projects/wilddiffusion/vla/atomic_data"
 export HF_HOME="/fs/nexus-projects/wilddiffusion/vla/libero_256"
-export CUDA_VISIBLE_DEVICES=0
+export CUDA_VISIBLE_DEVICES=1
 
 
 CONFIG_NAME="${CONFIG_NAME:-pi05_libero_action_expert}"
-EXP_NAME="${EXP_NAME:-pi05_action_expert_jax}"
+EXP_NAME="${EXP_NAME:-pi05_action_expert_jax_v2}"
 RUN_NORM_STATS="${RUN_NORM_STATS:-1}"
 
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.80
@@ -44,4 +44,4 @@ export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 # python3 scripts/compute_norm_stats.py --config-name "${CONFIG_NAME}"
 # fi
 
-python3 scripts/train.py "${CONFIG_NAME}" --exp-name="${EXP_NAME}" --overwrite
+python3 scripts/train.py "${CONFIG_NAME}" --exp-name="${EXP_NAME}" --resume

@@ -37,7 +37,7 @@ export XLA_PYTHON_CLIENT_ALLOCATOR="${XLA_PYTHON_CLIENT_ALLOCATOR:-platform}"
 
 RUN_TS=$(date +%Y%m%d_%H%M%S)
 EXP_NAME="${EXP_NAME:-pi05_libero_${RUN_TS}}"
-CKPT_DIR="${CKPT_DIR:-/fs/nexus-scratch/yliang17/Research/VLA/openpi/checkpoints_pi05_libero}"
+CKPT_DIR="${CKPT_DIR:-/fs/nexus-projects/wilddiffusion/vla/openpi/checkpoints_pi05_libero}"
 RESUME="${RESUME:-0}"
 OVERWRITE="${OVERWRITE:-0}"
 

@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=pi05_vlm_lora_ae
-#SBATCH --output=slurm_output/pi05_vlm_lora_action_expert_%j.log
-#SBATCH --error=slurm_output/pi05_vlm_lora_action_expert_%j.log
+#SBATCH --job-name=pi05_lora_v1
+#SBATCH --output=slurm_output/pi05_libero_lora_v1_%j.log
+#SBATCH --error=slurm_output/pi05_libero_lora_v1_%j.log
 #SBATCH --time=72:00:00
 #SBATCH --account=cml-director
 #SBATCH --partition=cml-director
@@ -22,7 +22,7 @@ if [[ -f /fs/nexus-scratch/yliang17/Research/VLA/config/key.conf ]]; then
 fi
 
 cd /fs/nexus-scratch/yliang17/Research/VLA/openpi
-mkdir -p slurm_output
+mkdir -p slurm_output logs
 
 export CACHE_DIR="${CACHE_DIR:-/fs/nexus-projects/wilddiffusion/cache}"
 export HF_HOME="${HF_HOME:-$CACHE_DIR}"
@@ -39,14 +39,14 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION="${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.80}"
 export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-true}"
 export XLA_PYTHON_CLIENT_ALLOCATOR="${XLA_PYTHON_CLIENT_ALLOCATOR:-platform}"
 
-CONFIG_NAME="${CONFIG_NAME:-pi05_libero_vlm_lora_action_expert}"
+CONFIG_NAME="${CONFIG_NAME:-pi05_libero_lora_v1}"
 RUN_TS="${RUN_TS:-$(date +%Y%m%d_%H%M%S)}"
-EXP_NAME="${EXP_NAME:-pi05_vlm_lora_action_expert_${RUN_TS}}"
-CHECKPOINT_BASE_DIR="${CHECKPOINT_BASE_DIR:-/fs/nexus-scratch/yliang17/Research/VLA/openpi/checkpoints_vlm_lora_action_expert}"
+EXP_NAME="${EXP_NAME:-pi05_libero_lora_v1_${RUN_TS}}"
+CHECKPOINT_BASE_DIR="${CHECKPOINT_BASE_DIR:-/fs/nexus-scratch/yliang17/Research/VLA/openpi/checkpoints_pi05_libero_lora_v1}"
 NUM_TRAIN_STEPS="${NUM_TRAIN_STEPS:-30000}"
-RUN_NORM_STATS="${RUN_NORM_STATS:-1}"
+RUN_NORM_STATS="${RUN_NORM_STATS:-0}"
 OVERWRITE="${OVERWRITE:-0}"
-RESUME="${RESUME:-0}"
+RESUME="${RESUME:-1}"
 
 if [[ "${RUN_NORM_STATS}" == "1" ]]; then
   python3 scripts/compute_norm_stats.py --config-name="${CONFIG_NAME}"
@@ -57,7 +57,6 @@ TRAIN_ARGS=(
   --exp-name="${EXP_NAME}"
   --checkpoint-base-dir="${CHECKPOINT_BASE_DIR}"
   --num-train-steps="${NUM_TRAIN_STEPS}"
-  --keep-period None
 )
 
 if [[ "${RESUME}" == "1" ]]; then

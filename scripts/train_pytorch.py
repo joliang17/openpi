@@ -188,10 +188,22 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, data_config,
         tmp_ckpt_dir.rename(final_ckpt_dir)
 
         logging.info(f"Saved checkpoint at step {global_step} -> {final_ckpt_dir}")
+        _remove_old_checkpoints(config.checkpoint_dir, keep_step=global_step)
 
         # Log checkpoint to wandb
         if config.wandb_enabled:
             wandb.log({"checkpoint_step": global_step}, step=global_step)
+
+
+def _remove_old_checkpoints(checkpoint_dir, *, keep_step: int):
+    """Remove numeric checkpoint directories except the requested step."""
+    for ckpt_dir in checkpoint_dir.iterdir():
+        if not ckpt_dir.is_dir() or not ckpt_dir.name.isdigit():
+            continue
+        if int(ckpt_dir.name) == keep_step:
+            continue
+        shutil.rmtree(ckpt_dir)
+        logging.info(f"Removed old checkpoint {ckpt_dir}")
 
 
 def load_checkpoint(model, optimizer, checkpoint_dir, device):

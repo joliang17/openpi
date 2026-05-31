@@ -3,9 +3,10 @@
 #SBATCH --output=slurm_output/pi05_skill_router.log
 #SBATCH --error=slurm_output/pi05_skill_router.log
 #SBATCH --time=72:00:00
-#SBATCH --account=scavenger 
-#SBATCH --partition=scavenger
-#SBATCH --gres=gpu:rtxa6000:1
+#SBATCH --account=cml-director
+#SBATCH --partition=cml-director
+#SBATCH --qos=cml-high_long
+#SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=6
 #SBATCH --mem=128G
 
@@ -38,11 +39,11 @@ export XLA_PYTHON_CLIENT_ALLOCATOR=platform
 CHECKPOINT_BASE_DIR="/fs/nexus-projects/wilddiffusion/vla/openpi_skill_router"
 RUN_TS="${RUN_TS:-$(date +%Y%m%d_%H%M%S)}"
 STAGE1_EXP_PROVIDED="${STAGE1_EXP:-}"
-STAGE1_EXP="${STAGE1_EXP:-pi05_skill_router_stage1_20260507_101717}"
+STAGE1_EXP="${STAGE1_EXP:-pi05_skill_router_stage1_${RUN_TS}}"
 STAGE2_EXP_PROVIDED="${STAGE2_EXP:-}"
-STAGE2_EXP="${STAGE2_EXP:-pi05_skill_router_stage2_from_stage1_20260507_101717_step6000_${RUN_TS}}"
+STAGE2_EXP="${STAGE2_EXP:-pi05_skill_router_stage2_from_${STAGE1_EXP}_step${STAGE1_STEP:-6000}}"
 STAGE1_STEP="${STAGE1_STEP:-6000}"
-TRAIN_STAGE1="${TRAIN_STAGE1:-0}"
+TRAIN_STAGE1="${TRAIN_STAGE1:-1}"
 STAGE1_RESUME="${STAGE1_RESUME:-0}"
 STAGE1_OVERWRITE="${STAGE1_OVERWRITE:-0}"
 STAGE1_NUM_TRAIN_STEPS="${STAGE1_NUM_TRAIN_STEPS:-60000}"
@@ -75,6 +76,7 @@ if [[ "${TRAIN_STAGE1}" == "1" ]]; then
     --exp-name="${STAGE1_EXP}"
     --checkpoint-base-dir="${CHECKPOINT_BASE_DIR}"
     --num-train-steps="${STAGE1_NUM_TRAIN_STEPS}"
+    --keep-period None
   )
 
   if [[ "${STAGE1_RESUME}" == "1" ]]; then
@@ -120,6 +122,7 @@ TRAIN_ARGS=(
   --exp-name="${STAGE2_EXP}"
   --checkpoint-base-dir="${CHECKPOINT_BASE_DIR}"
   --num-train-steps="${STAGE2_NUM_TRAIN_STEPS}"
+  --keep-period None
 )
 
 if [[ "${STAGE2_RESUME}" == "1" ]]; then

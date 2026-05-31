@@ -1,12 +1,14 @@
 import dataclasses
 import logging
 import re
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 import flax.traverse_util
 import numpy as np
 
 import openpi.models.model as _model
+import openpi.models.tokenizer as _tokenizer
 import openpi.shared.array_typing as at
 import openpi.shared.download as download
 
@@ -64,6 +66,67 @@ class PartialCheckpointWeightLoader(WeightLoader):
     def load(self, params: at.Params) -> at.Params:
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
         return _merge_params(loaded_params, params, missing_regex=self.missing_regex)
+
+
+@dataclasses.dataclass(frozen=True)
+class LlmSkillEmbeddingCheckpointWeightLoader(WeightLoader):
+    """Loads a checkpoint and initializes skill embeddings from the LLM token embedding table."""
+
+    params_path: str
+    skill_vocab: Sequence[str]
+    missing_regex: str = ".*(skill_|lora).*"
+
+    def load(self, params: at.Params) -> at.Params:
+        loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        merged_params = _merge_params(loaded_params, params, missing_regex=self.missing_regex)
+
+        flat_ref = flax.traverse_util.flatten_dict(params, sep="/")
+        flat_merged = flax.traverse_util.flatten_dict(merged_params, sep="/")
+        embedding_key = "PaliGemma/llm/embedder/input_embedding"
+        skill_key = "skill_emb_bank"
+
+        if embedding_key not in flat_merged:
+            raise KeyError(f"Cannot initialize skill embeddings because {embedding_key!r} is missing.")
+        if skill_key not in flat_ref:
+            raise KeyError(f"Cannot initialize skill embeddings because {skill_key!r} is not in the target model.")
+
+        llm_embedding = np.asarray(flat_merged[embedding_key])
+        skill_shape = flat_ref[skill_key].shape
+        if len(skill_shape) != 2:
+            raise ValueError(f"Expected {skill_key!r} to be rank 2, got shape {skill_shape}.")
+        if len(self.skill_vocab) != skill_shape[0]:
+            raise ValueError(
+                f"skill_vocab has {len(self.skill_vocab)} entries but {skill_key!r} expects {skill_shape[0]} rows."
+            )
+        if llm_embedding.shape[1] != skill_shape[1]:
+            raise ValueError(
+                f"LLM embedding dim {llm_embedding.shape[1]} does not match {skill_key!r} dim {skill_shape[1]}. "
+                "Set skill_emb_dim to the VLM embedding width for direct LLM initialization."
+            )
+
+        tokenizer = _tokenizer.PaligemmaTokenizer(max_len=16)
+        sp_tokenizer = tokenizer._tokenizer  # Reuse the exact tokenizer used for PaliGemma prompts.
+        # Keep only the *direction* of each skill's LLM embedding and rescale it
+        # to the from-scratch skill_emb_bank magnitude (init = normal * 0.02, so
+        # row norm ~= 0.02 * sqrt(dim)). The raw LLM embeddings live at
+        # transformer-hidden scale (row norm ~tens); feeding that into the
+        # freshly-initialized skill conditioning heads (skill_to_adarms /
+        # skill_to_action_film) injects a ~100x oversized signal and blows up
+        # the action loss. Matching the small from-scratch scale preserves the
+        # LLM semantics (direction) without the scale shock.
+        target_norm = 0.02 * np.sqrt(skill_shape[1])
+        skill_rows = []
+        for skill in self.skill_vocab:
+            cleaned_skill = skill.strip().replace("_", " ").replace("\n", " ")
+            token_ids = sp_tokenizer.encode(cleaned_skill, add_bos=False)
+            if not token_ids:
+                raise ValueError(f"Skill {skill!r} produced no PaliGemma tokens.")
+            row = np.mean(llm_embedding[np.asarray(token_ids, dtype=np.int32)], axis=0)
+            row = row / (np.linalg.norm(row) + 1e-8) * target_norm
+            skill_rows.append(row)
+
+        flat_merged[skill_key] = np.stack(skill_rows, axis=0).astype(flat_ref[skill_key].dtype)
+        return flax.traverse_util.unflatten_dict(flat_merged, sep="/")
 
 
 @dataclasses.dataclass(frozen=True)
