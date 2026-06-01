@@ -72,6 +72,14 @@ def create_trained_policy(
         except ImportError:
             pytorch_device = "cpu"
 
+    policy_metadata = dict(train_config.policy_metadata or {})
+    base_data_config = getattr(train_config.data, "base_config", None)
+    if getattr(train_config.model, "use_skill_router", False):
+        policy_metadata.setdefault(
+            "skill_vocab",
+            tuple(getattr(base_data_config, "skill_vocab", ("close", "open", "pick", "place", "turn"))),
+        )
+
     return _policy.Policy(
         model,
         transforms=[
@@ -88,7 +96,7 @@ def create_trained_policy(
             *repack_transforms.outputs,
         ],
         sample_kwargs=sample_kwargs,
-        metadata=train_config.policy_metadata,
+        metadata=policy_metadata,
         is_pytorch=is_pytorch,
         pytorch_device=pytorch_device if is_pytorch else None,
     )

@@ -20,6 +20,42 @@ from openpi.shared import nnx_utils
 
 BasePolicy: TypeAlias = _base_policy.BasePolicy
 
+DEFAULT_SKILL_VOCAB = ("close", "open", "pick", "place", "turn")
+
+
+def _as_scalar(value: Any) -> Any:
+    array = np.asarray(value)
+    if array.shape == ():
+        return array.item()
+    if array.size == 1:
+        return array.reshape(()).item()
+    return value
+
+
+def _add_skill_metadata(outputs: dict[str, Any], info: dict[str, Any], skill_vocab: Sequence[str]) -> None:
+    if not info or "skill_idx" not in info:
+        return
+
+    skill_idx = int(_as_scalar(info["skill_idx"]))
+    skill_name = skill_vocab[skill_idx] if 0 <= skill_idx < len(skill_vocab) else str(skill_idx)
+    skill_probs = np.asarray(info.get("skill_probs", []), dtype=np.float32).reshape(-1)
+    skill_prob = float(_as_scalar(info.get("top1_skill_prob", skill_probs[skill_idx] if skill_idx < len(skill_probs) else 0.0)))
+    skill_probs_by_name = {
+        skill_vocab[i] if i < len(skill_vocab) else str(i): float(prob)
+        for i, prob in enumerate(skill_probs.tolist())
+    }
+
+    outputs["skill_idx"] = skill_idx
+    outputs["skill_name"] = skill_name
+    outputs["skill_prob"] = skill_prob
+    outputs["skill_probs"] = skill_probs
+    outputs["skill_probs_by_name"] = skill_probs_by_name
+
+    if "skill_action_gate_prob" in info:
+        outputs["skill_action_gate_prob"] = float(_as_scalar(info["skill_action_gate_prob"]))
+    if "skill_effect_gate_prob" in info:
+        outputs["skill_effect_gate_prob"] = float(_as_scalar(info["skill_effect_gate_prob"]))
+
 
 class Policy(BasePolicy):
     def __init__(
@@ -59,9 +95,15 @@ class Policy(BasePolicy):
             self._model = self._model.to(pytorch_device)
             self._model.eval()
             self._sample_actions = model.sample_actions
+            self._sample_actions_with_info = None
         else:
             # JAX model setup
             self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+            self._sample_actions_with_info = (
+                nnx_utils.module_jit(model.sample_actions_with_info)
+                if hasattr(model, "sample_actions_with_info")
+                else None
+            )
             self._rng = rng or jax.random.key(0)
 
     @override
@@ -89,17 +131,23 @@ class Policy(BasePolicy):
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
-        outputs = {
-            "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
-        }
+        skill_info = {}
+        if self._sample_actions_with_info is not None:
+            actions, skill_info = self._sample_actions_with_info(
+                sample_rng_or_pytorch_device, observation, **sample_kwargs
+            )
+        else:
+            actions = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+        outputs = {"state": inputs["state"], "actions": actions}
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
         else:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+            skill_info = jax.tree.map(lambda x: np.asarray(x[0, ...]), skill_info)
 
         outputs = self._output_transform(outputs)
+        _add_skill_metadata(outputs, skill_info, self._metadata.get("skill_vocab", DEFAULT_SKILL_VOCAB))
         outputs["policy_timing"] = {
             "infer_ms": model_time * 1000,
         }

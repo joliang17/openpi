@@ -613,15 +613,14 @@ class Pi0(_model.BaseModel):
         }
         return total_loss, info
 
-    @override
-    def sample_actions(
+    def sample_actions_with_info(
         self,
         rng: at.KeyArrayLike,
         observation: _model.Observation,
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
-    ) -> _model.Actions:
+    ) -> tuple[_model.Actions, dict[str, at.Array]]:
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
@@ -642,9 +641,11 @@ class Pi0(_model.BaseModel):
         skill_state_cond = None
         skill_action_film_gate = None
         skill_effect_gate = None
+        skill_info = {}
         if self.use_skill_router:
             skill_hidden = self._skill_hidden(prefix_out, prefix_mask)
             skill_logits = self.skill_classifier(skill_hidden)
+            skill_probs = jax.nn.softmax(skill_logits, axis=-1)
             rng, skill_rng = jax.random.split(rng)
             (
                 skill_adarms_cond,
@@ -665,6 +666,15 @@ class Pi0(_model.BaseModel):
                 _, kv_cache = self.PaliGemma.llm(
                     [prefix_tokens_cond, None], mask=prefix_attn_mask, positions=positions
                 )
+            skill_info = {
+                "skill_idx": jnp.argmax(skill_logits, axis=-1),
+                "skill_probs": skill_probs,
+                "top1_skill_prob": jnp.max(skill_probs, axis=-1),
+            }
+            if skill_action_film_gate is not None:
+                skill_info["skill_action_gate_prob"] = skill_action_film_gate[:, 0]
+            if skill_effect_gate is not None:
+                skill_info["skill_effect_gate_prob"] = skill_effect_gate[:, 0]
 
         def step(carry):
             x_t, time = carry
@@ -712,4 +722,16 @@ class Pi0(_model.BaseModel):
             return time >= -dt / 2
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
-        return x_0
+        return x_0, skill_info
+
+    @override
+    def sample_actions(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        *,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
+    ) -> _model.Actions:
+        actions, _ = self.sample_actions_with_info(rng, observation, num_steps=num_steps, noise=noise)
+        return actions

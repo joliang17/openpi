@@ -22,6 +22,7 @@ os.environ["PYTHONPATH"] = os.pathsep.join(
 from libero.libero import benchmark
 from libero.libero import get_libero_path
 from libero.libero.envs import OffScreenRenderEnv
+import cv2
 import numpy as np
 from openpi_client import image_tools
 from openpi_client import websocket_client_policy as _websocket_client_policy
@@ -61,6 +62,44 @@ class Args:
     action_horizon: int = 10
 
     seed: int = 7  # Random Seed (for reproducibility)
+
+
+def _skill_overlay_label(result: dict) -> str | None:
+    skill_name = result.get("skill_name")
+    if skill_name is None:
+        return None
+
+    parts = [f"skill={skill_name}"]
+    if "skill_prob" in result:
+        parts[0] += f" p={float(result['skill_prob']):.3f}"
+    if "skill_action_gate_prob" in result:
+        parts.append(f"action_gate={float(result['skill_action_gate_prob']):.3f}")
+    if "skill_effect_gate_prob" in result:
+        parts.append(f"effect_gate={float(result['skill_effect_gate_prob']):.3f}")
+    return "\n".join(parts)
+
+
+def _draw_overlay_label(image: np.ndarray, label: str | None) -> np.ndarray:
+    if not label:
+        return image
+
+    frame = image.copy()
+    lines = str(label).splitlines()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.42
+    thickness = 1
+    pad = 4
+    line_gap = 3
+    sizes = [cv2.getTextSize(line, font, font_scale, thickness)[0] for line in lines]
+    width = max(w for w, _ in sizes) + 2 * pad
+    line_height = max(h for _, h in sizes)
+    box_height = len(lines) * line_height + (len(lines) - 1) * line_gap + 2 * pad
+    cv2.rectangle(frame, (0, 0), (width, box_height), (0, 0, 0), -1)
+    y = pad + line_height
+    for line in lines:
+        cv2.putText(frame, line, (pad, y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+        y += line_height + line_gap
+    return frame
 
 
 def eval_libero(args: Args) -> None:
@@ -118,6 +157,8 @@ def eval_libero(args: Args) -> None:
             # Setup
             t = 0
             replay_images = []
+            current_skill_label = None
+            done = False
 
             logging.info(f"Starting episode {task_episodes+1}...")
             while t < max_steps + args.num_steps_wait:
@@ -140,9 +181,6 @@ def eval_libero(args: Args) -> None:
                         image_tools.resize_with_pad(wrist_img, args.resize_size, args.resize_size)
                     )
 
-                    # Save preprocessed image for replay video
-                    replay_images.append(img)
-
                     if not action_plan:
                         # Finished executing previous action chunk -- compute new chunk
                         # Prepare observations dict
@@ -160,11 +198,16 @@ def eval_libero(args: Args) -> None:
                         }
 
                         # Query model to get action
-                        action_chunk = client.infer(element)["actions"]
+                        result = client.infer(element)
+                        action_chunk = result["actions"]
+                        current_skill_label = _skill_overlay_label(result)
                         assert (
                             len(action_chunk) >= args.replan_steps
                         ), f"We want to replan every {args.replan_steps} steps, but policy only predicts {len(action_chunk)} steps."
                         action_plan.extend(action_chunk[: args.replan_steps])
+
+                    # Save preprocessed image for replay video with the current routed skill metadata.
+                    replay_images.append(_draw_overlay_label(img, current_skill_label))
 
                     action = action_plan.popleft()
 

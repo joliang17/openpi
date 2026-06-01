@@ -121,6 +121,14 @@ def test_pi05_gated_film_skill_router_dummy_model():
     assert "skill_effect_gate_std" in info
     assert "skill_effect_gate_skill_0" in info
 
+    actions, sample_info = nnx_utils.module_jit(model.sample_actions_with_info)(key, obs)
+    assert actions.shape == (batch_size, config.action_horizon, config.action_dim)
+    assert sample_info["skill_idx"].shape == (batch_size,)
+    assert sample_info["skill_probs"].shape == (batch_size, config.num_skills)
+    assert sample_info["top1_skill_prob"].shape == (batch_size,)
+    assert sample_info["skill_action_gate_prob"].shape == (batch_size,)
+    assert sample_info["skill_effect_gate_prob"].shape == (batch_size,)
+
 
 def test_pi05_skill_effect_gate_config_validation():
     with pytest.raises(ValueError, match="skill_effect_gate_source"):

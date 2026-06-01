@@ -1,8 +1,8 @@
 #!/bin/bash
 
 #SBATCH --job-name=eval_srj
-#SBATCH --output=slurm_output/eval_pi05_skill_router_joint.log
-#SBATCH --error=slurm_output/eval_pi05_skill_router_joint.log
+#SBATCH --output=slurm_output/%x_%j.log
+#SBATCH --error=slurm_output/%x_%j.log
 #SBATCH --time=72:00:00
 #SBATCH --account=scavenger
 #SBATCH --partition=scavenger
@@ -35,8 +35,8 @@ export XLA_PYTHON_CLIENT_PREALLOCATE="${XLA_PYTHON_CLIENT_PREALLOCATE:-true}"
 export XLA_PYTHON_CLIENT_ALLOCATOR="${XLA_PYTHON_CLIENT_ALLOCATOR:-platform}"
 export MUJOCO_GL="${MUJOCO_GL:-egl}"
 
-EXP_NAME="pi05_skill_router_joint"
-POLICY_CONFIG="pi05_libero_vlm_lora_skill_router_joint"
+EXP_NAME="${EXP_NAME:-pi05_skill_router_joint}"
+POLICY_CONFIG="${POLICY_CONFIG:-pi05_libero_vlm_lora_skill_router_joint}"
 PORT="${PORT:-8025}"
 CKPT="${CKPT:-/fs/nexus-projects/wilddiffusion/vla/openpi_vlm_lora_skill_router/pi05_libero_vlm_lora_skill_router_joint/pi05_vlm_lora_skill_router_joint_20260515_113425/29999}"
 NUM_TRIALS_PER_TASK="${NUM_TRIALS_PER_TASK:-10}"
@@ -99,8 +99,8 @@ libero10_result_path() {
 }
 
 libero_pro_result_path() {
-  printf '%s/libero_pro_eval_modelopenpi_tasklibero_10_%s_seed%s_h%s.json' \
-    "${RESULTS_DIR_LIBPRO}" "${PERTURBATION_TYPE}" "$1" "$2"
+  printf '%s/libero_eval_modelopenpi_tasklibero_10_seed%s_h%s.json' \
+    "${RESULTS_DIR_LIBPRO}" "$1" "$2"
 }
 
 run_libero10_eval() {

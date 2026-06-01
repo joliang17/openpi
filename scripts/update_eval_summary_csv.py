@@ -43,6 +43,8 @@ MODEL_ALIASES = {
     "skill_router_stage2_adarms_only": "skill_router_adarms_only",
     "skill_router_stage2_film_only": "skill_router_film_only",
     "skill_router_stage2_film_vlm": "skill_router_film_vlm",
+    "vlm_lora_skill_effect_gate_router_joint": "skill_effect_gate_router",
+    "vlm_lora_gated_film_skill_router_joint": "gated_film_skill_router",
 }
 
 
