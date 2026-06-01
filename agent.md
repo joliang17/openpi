@@ -12,6 +12,16 @@ This file records the process future Codex sessions should follow for OpenPI LIB
 - Commit only the files relevant to the requested code/documentation change.
 - Treat `results/`, `data/`, `logs/`, `slurm_output/`, and `results_csv/` as generated outputs unless the user explicitly asks to commit artifacts.
 
+## TODO Maintenance
+
+Maintain `todo.md` as the project task queue.
+
+- When the user gives a new follow-up task that cannot be completed immediately, add it to `todo.md`.
+- When a task in `todo.md` is completed, delete that item from `todo.md`.
+- Keep entries concrete and checkable, with relevant job IDs, paths, or model names when useful.
+- Before ending work on a multi-step request, check `todo.md` and update it to reflect what remains.
+- Commit `todo.md` updates when they are part of a requested documentation/process change. Do not commit generated result artifacts with it unless explicitly asked.
+
 ## Training Process
 
 Training scripts live in `shell_scripts/train_*.sh`.
@@ -234,4 +244,3 @@ results/pi05_vlm_lora_gated_film_skill_router_joint_libero10
 results/pi05_lora_gated_film_skill_router_joint_libero10
 results/pi05_skill_router_joint_libero10
 ```
-
