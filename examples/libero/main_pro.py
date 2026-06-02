@@ -100,6 +100,65 @@ def _draw_overlay_label(image: np.ndarray, label: str | None) -> np.ndarray:
     return frame
 
 
+def _rollout_root(video_out_path: str) -> pathlib.Path:
+    path = pathlib.Path(video_out_path)
+    if path.name.startswith("seed") and path.parent.name == "videos":
+        return pathlib.Path("data/rollouts")
+    if path.name == "videos":
+        return pathlib.Path("data/rollouts")
+    return path
+
+
+def _rollout_model_name(args) -> str:
+    path = pathlib.Path(args.video_out_path)
+    eval_dir = None
+    if path.name.startswith("seed") and path.parent.name == "videos":
+        eval_dir = path.parent.parent.name
+    elif path.name == "videos":
+        eval_dir = path.parent.name
+    if eval_dir and eval_dir.endswith("_libero_pro"):
+        return eval_dir.removesuffix("_libero_pro")
+    return args.model_name
+
+
+def _rollout_suite_name(args) -> str:
+    if args.perturbation_type == "none":
+        return args.task_suite_name
+    return f"{args.task_suite_name}_pert{args.perturbation_type}"
+
+
+def _processed_task_description(task_description: str) -> str:
+    return task_description.lower().replace(" ", "_").replace("\n", "_").replace(".", "_")[:50]
+
+
+def _failure_video_path(args, task_description: str, episode_idx: int) -> pathlib.Path:
+    rollout_dir = (
+        _rollout_root(args.video_out_path)
+        / _rollout_model_name(args)
+        / _rollout_suite_name(args)
+        / f"h{args.action_horizon}"
+    )
+    filename = (
+        f"seed{args.seed}--episode={episode_idx}--success=False"
+        f"--task={_processed_task_description(task_description)}.mp4"
+    )
+    return rollout_dir / filename
+
+
+def _save_failure_video(args, task_description: str, episode_idx: int, replay_images: list[np.ndarray]) -> None:
+    if not replay_images:
+        return
+    video_path = _failure_video_path(args, task_description, episode_idx)
+    video_path.parent.mkdir(parents=True, exist_ok=True)
+    imageio.mimwrite(
+        video_path,
+        [np.asarray(x) for x in replay_images],
+        fps=10,
+        codec="libx264",
+    )
+    logging.info(f"Saved failure video to {video_path}")
+
+
 # ---------------------------------------------------------------------------
 # Skill / expert extraction
 # ---------------------------------------------------------------------------
@@ -242,7 +301,7 @@ def eval_libero_pro(args) -> None:
     log_file.write(f"Replan steps: {args.replan_steps}\n")
 
     np.random.seed(args.seed)
-    pathlib.Path(args.video_out_path).mkdir(parents=True, exist_ok=True)
+    _rollout_root(args.video_out_path).mkdir(parents=True, exist_ok=True)
 
     max_steps = MAX_STEPS_MAP.get(args.task_suite_name, 600)
 
@@ -405,14 +464,8 @@ def eval_libero_pro(args) -> None:
             task_episodes += 1
             total_episodes += 1
 
-            suffix = "success" if done else "failure"
-            task_segment = task_description.replace(" ", "_")
-            imageio.mimwrite(
-                pathlib.Path(args.video_out_path) / f"rollout_{task_segment}_{suffix}_{task_episodes}.mp4",
-                [np.asarray(x) for x in replay_images],
-                fps=10,
-                codec="libx264",
-            )
+            if not done:
+                _save_failure_video(args, task_description, total_episodes, replay_images)
 
             print(f"Success: {done}")
             print(f"# episodes completed so far: {total_episodes}")
@@ -499,7 +552,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_trials_per_task", type=int, default=10)
 
     # Output
-    parser.add_argument("--video_out_path", type=str, default="data/libero_pro/videos")
+    parser.add_argument("--video_out_path", type=str, default="data/rollouts")
     parser.add_argument("--results_dir", type=str, default="results")
     parser.add_argument("--model_name", type=str, default="openpi")
     parser.add_argument("--action_horizon", type=int, default=10)
